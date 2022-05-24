@@ -71,7 +71,10 @@ $(PROTOC_GEN_GO): $(PROTO_DIR)
 build_meta_service_grpc: $(PROTOC) $(PROTOC_GEN_GO)
 	$(MAKE) -C providerframework/meta_service metaservice.pb.go PROTOC=$(PROTOC) PROTOC_GEN_GO=$(PROTOC_GEN_GO)
 
-build_grpc_interface: build_meta_service_grpc
+build_provider_grpc: $(PROTOC) $(PROTOC_GEN_GO)
+	$(MAKE) -C providers providerservice.pb.go PROTOC=$(PROTOC) PROTOC_GEN_GO=$(PROTOC_GEN_GO)
+
+build_grpc_interface: build_meta_service_grpc build_provider_grpc
 	go mod download
 
 
