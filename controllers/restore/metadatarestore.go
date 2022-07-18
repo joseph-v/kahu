@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"google.golang.org/grpc"
 	"io"
 	"reflect"
 
@@ -40,7 +41,7 @@ const (
 )
 
 var (
-	excludedResources = sets.NewString(
+	excludeResources = sets.NewString(
 		"Node",
 		"Namespace",
 		"Event",
@@ -71,7 +72,7 @@ func (ctx *restoreContext) processMetadataRestore(restore *kahuapi.Restore) erro
 	// fetch backup content and cache them
 	err = ctx.fetchBackupContent(backupInfo.backupProvider, backupIdentifier, restore)
 	if err != nil {
-		restore.Status.Phase = kahuapi.RestorePhaseFailed
+		restore.Status.State = kahuapi.RestoreStateFailed
 		restore.Status.FailureReason = fmt.Sprintf("Failed to get backup content. %s",
 			err)
 		restore, err = ctx.updateRestoreStatus(restore)
@@ -81,7 +82,7 @@ func (ctx *restoreContext) processMetadataRestore(restore *kahuapi.Restore) erro
 	// filter resources from cache
 	err = ctx.filter.handle(restore)
 	if err != nil {
-		restore.Status.Phase = kahuapi.RestorePhaseFailed
+		restore.Status.State = kahuapi.RestoreStateFailed
 		errMsg := fmt.Sprintf("Failed to filter resources. %s", err)
 		restore.Status.FailureReason = errMsg
 		restore, err = ctx.updateRestoreStatus(restore)
@@ -91,7 +92,7 @@ func (ctx *restoreContext) processMetadataRestore(restore *kahuapi.Restore) erro
 	// add mutation
 	err = ctx.mutator.handle(restore)
 	if err != nil {
-		restore.Status.Phase = kahuapi.RestorePhaseFailed
+		restore.Status.State = kahuapi.RestoreStateFailed
 		restore.Status.FailureReason = fmt.Sprintf("Failed to mutate resources. %s", err)
 		restore, err = ctx.updateRestoreStatus(restore)
 		return err
@@ -100,7 +101,7 @@ func (ctx *restoreContext) processMetadataRestore(restore *kahuapi.Restore) erro
 	// process CRD resource first
 	err = ctx.applyCRD()
 	if err != nil {
-		restore.Status.Phase = kahuapi.RestorePhaseFailed
+		restore.Status.State = kahuapi.RestoreStateFailed
 		restore.Status.FailureReason = fmt.Sprintf("Failed to apply CRD resources. %s", err)
 		restore, err = ctx.updateRestoreStatus(restore)
 		return err
@@ -109,13 +110,17 @@ func (ctx *restoreContext) processMetadataRestore(restore *kahuapi.Restore) erro
 	// process resources
 	err = ctx.applyIndexedResource()
 	if err != nil {
-		restore.Status.Phase = kahuapi.RestorePhaseFailed
+		restore.Status.State = kahuapi.RestoreStateFailed
 		restore.Status.FailureReason = fmt.Sprintf("Failed to apply resources. %s", err)
 		restore, err = ctx.updateRestoreStatus(restore)
 		return err
 	}
 
-	restore.Status.Phase = kahuapi.RestorePhaseCompleted
+	restore.Status.Stage = kahuapi.RestoreStageFinished
+	restore.Status.State = kahuapi.RestoreStateCompleted
+	restore.Status.State = kahuapi.RestoreStateCompleted
+	time := metav1.Now()
+	restore.Status.CompletionTimestamp = &time
 	restore, err = ctx.updateRestoreStatus(restore)
 	return err
 }
@@ -198,37 +203,38 @@ func (ctx *restoreContext) fetchBackupInfo(restore *kahuapi.Restore) (*backupInf
 }
 
 func (ctx *restoreContext) fetchMetaServiceClient(backupProvider *kahuapi.Provider,
-	restore *kahuapi.Restore) (metaservice.MetaServiceClient, error) {
+	restore *kahuapi.Restore) (metaservice.MetaServiceClient, *grpc.ClientConn, error) {
 	if backupProvider.Spec.Type != kahuapi.ProviderTypeMetadata {
-		return nil, fmt.Errorf("invalid metadata provider type (%s)",
+		return nil, nil, fmt.Errorf("invalid metadata provider type (%s)",
 			backupProvider.Spec.Type)
 	}
 
 	// fetch service name
 	providerService, exist := backupProvider.Annotations[utils.BackupLocationServiceAnnotation]
 	if !exist {
-		return nil, fmt.Errorf("failed to get metadata provider(%s) service info",
+		return nil, nil, fmt.Errorf("failed to get metadata provider(%s) service info",
 			backupProvider.Name)
 	}
 
-	metaServiceClient, err := metaservice.GetMetaServiceClient(providerService)
+	metaServiceClient, grpcConn, err := metaservice.GetMetaServiceClient(providerService)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get metadata service client(%s)",
+		return nil, nil, fmt.Errorf("failed to get metadata service client(%s)",
 			providerService)
 	}
 
-	return metaServiceClient, nil
+	return metaServiceClient, grpcConn, nil
 }
 
 func (ctx *restoreContext) fetchBackupContent(backupProvider *kahuapi.Provider,
 	backupIdentifier *metaservice.BackupIdentifier,
 	restore *kahuapi.Restore) error {
 	// fetch meta service client
-	metaServiceClient, err := ctx.fetchMetaServiceClient(backupProvider, restore)
+	metaServiceClient, grpcConn, err := ctx.fetchMetaServiceClient(backupProvider, restore)
 	if err != nil {
 		ctx.logger.Errorf("Error fetching meta service client. %s", err)
 		return err
 	}
+	defer grpcConn.Close()
 
 	// fetch metadata backup file
 	restoreClient, err := metaServiceClient.Restore(context.TODO(), &metaservice.RestoreRequest{
@@ -281,7 +287,7 @@ func (ctx *restoreContext) fetchBackupContent(backupProvider *kahuapi.Provider,
 }
 
 func (ctx *restoreContext) excludeResource(resource *unstructured.Unstructured) bool {
-	if excludedResources.Has(resource.GetKind()) {
+	if excludeResources.Has(resource.GetKind()) {
 		return true
 	}
 

@@ -20,214 +20,495 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"sort"
-	"time"
+	"regexp"
+	"strings"
 
+	jsonpatch "github.com/evanphx/json-patch"
+	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/util/sets"
-
-	metaservice "github.com/soda-cdm/kahu/providerframework/metaservice/lib/go"
-
-	"k8s.io/client-go/kubernetes"
-	restclient "k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/cache"
-
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/tools/cache"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/kubernetes/scheme"
 
-	"github.com/soda-cdm/kahu/apis/kahu/v1beta1"
+	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
 	"github.com/soda-cdm/kahu/client/clientset/versioned"
+	kahuscheme "github.com/soda-cdm/kahu/client/clientset/versioned/scheme"
 	kahuv1client "github.com/soda-cdm/kahu/client/clientset/versioned/typed/kahu/v1beta1"
-	kahuinformer "github.com/soda-cdm/kahu/client/informers/externalversions/kahu/v1beta1"
+	kahuinformer "github.com/soda-cdm/kahu/client/informers/externalversions"
 	kahulister "github.com/soda-cdm/kahu/client/listers/kahu/v1beta1"
 	"github.com/soda-cdm/kahu/controllers"
+	"github.com/soda-cdm/kahu/discovery"
 	"github.com/soda-cdm/kahu/utils"
-	"k8s.io/client-go/kubernetes/scheme"
 )
-
-const (
-	controllerName = "BackupController"
-	controllerOps  = "Backup"
-)
-
-type Config struct {
-	MetaServicePort    uint
-	MetaServiceAddress string
-}
 
 type controller struct {
-	config               *Config
+	ctx                  context.Context
 	logger               log.FieldLogger
-	restClientconfig     *restclient.Config
 	genericController    controllers.Controller
-	client               kubernetes.Interface
-	kahuClient           versioned.Interface
-	backupLister         kahulister.BackupLister
+	kubeClient           kubernetes.Interface
+	dynamicClient        dynamic.Interface
 	backupClient         kahuv1client.BackupInterface
-	backupLocationClient kahuv1client.BackupLocationInterface
+	backupLister         kahulister.BackupLister
+	backupLocationLister kahulister.BackupLocationLister
+	eventRecorder        record.EventRecorder
+	discoveryHelper      discovery.DiscoveryHelper
+	providerLister       kahulister.ProviderLister
+	volumeBackupClient   kahuv1client.VolumeBackupContentInterface
 }
 
-func NewController(config *Config,
-	restClientconfig *restclient.Config,
+func NewController(
+	ctx context.Context,
+	kubeClient kubernetes.Interface,
 	kahuClient versioned.Interface,
-	backupInformer kahuinformer.BackupInformer) (controllers.Controller, error) {
+	dynamicClient dynamic.Interface,
+	informer kahuinformer.SharedInformerFactory,
+	eventBroadcaster record.EventBroadcaster,
+	discoveryHelper discovery.DiscoveryHelper) (controllers.Controller, error) {
 
 	logger := log.WithField("controller", controllerName)
 	backupController := &controller{
-		kahuClient:           kahuClient,
-		backupLister:         backupInformer.Lister(),
-		restClientconfig:     restClientconfig,
-		backupClient:         kahuClient.KahuV1beta1().Backups(),
-		backupLocationClient: kahuClient.KahuV1beta1().BackupLocations(),
-		config:               config,
+		ctx:                  ctx,
 		logger:               logger,
+		kubeClient:           kubeClient,
+		backupClient:         kahuClient.KahuV1beta1().Backups(),
+		backupLister:         informer.Kahu().V1beta1().Backups().Lister(),
+		backupLocationLister: informer.Kahu().V1beta1().BackupLocations().Lister(),
+		dynamicClient:        dynamicClient,
+		discoveryHelper:      discoveryHelper,
+		providerLister:       informer.Kahu().V1beta1().Providers().Lister(),
+		volumeBackupClient:   kahuClient.KahuV1beta1().VolumeBackupContents(),
 	}
-
-	// register to informer to receive events and push events to worker queue
-	backupInformer.Informer().AddEventHandler(
-		cache.ResourceEventHandlerFuncs{
-			AddFunc:    backupController.handleAdd,
-			DeleteFunc: backupController.handleDel,
-		},
-	)
 
 	// construct controller interface to process worker queue
 	genericController, err := controllers.NewControllerBuilder(controllerName).
 		SetLogger(logger).
-		SetHandler(backupController.doBackup).
+		SetHandler(backupController.processQueue).
 		Build()
 	if err != nil {
 		return nil, err
 	}
 
+	// register to informer to receive events and push events to worker queue
+	informer.Kahu().
+		V1beta1().
+		Backups().
+		Informer().
+		AddEventHandler(
+			cache.ResourceEventHandlerFuncs{
+				AddFunc: genericController.Enqueue,
+				UpdateFunc: func(oldObj, newObj interface{}) {
+					genericController.Enqueue(newObj)
+				},
+			},
+		)
+
+	// initialize event recorder
+	eventRecorder := eventBroadcaster.NewRecorder(kahuscheme.Scheme,
+		v1.EventSource{Component: controllerName})
+	backupController.eventRecorder = eventRecorder
+
 	// reference back
 	backupController.genericController = genericController
+
+	// start volume backup reconciler
+	go newReconciler(defaultReconcileTimeLoop,
+		backupController.logger.WithField("source", "reconciler"),
+		informer.Kahu().V1beta1().VolumeBackupContents().Lister(),
+		backupController.backupClient,
+		backupController.backupLister).Run(ctx.Done())
+
 	return genericController, err
 }
 
-func (c *controller) doBackup(key string) error {
+func (ctrl *controller) processQueue(key string) error {
 	_, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		c.logger.Errorf("splitting key into namespace and name, error %s\n", err.Error())
+		ctrl.logger.Errorf("splitting key into namespace and name, error %s", err)
 		return err
 	}
 
-	backup, err := c.backupLister.Get(name)
+	ctrl.logger.Infof("Processing backup(%s) request", name)
+	backup, err := ctrl.backupLister.Get(name)
 	if err != nil {
-		c.logger.Errorf("error %s, Getting the backup resource from lister", err.Error())
+		// re enqueue for processing
+		return errors.Wrap(err, fmt.Sprintf("error getting backup %s from lister", name))
+	}
 
-		if apierrors.IsNotFound(err) {
-			c.logger.Debugf("backup %s not found", name)
+	backupClone := backup.DeepCopy()
+	// setup finalizer if not present
+	if isBackupInitNeeded(backupClone) {
+		backupClone, err = ctrl.backupInitialize(backupClone)
+		if err != nil {
+			ctrl.logger.Errorf("failed to initialize finalizer backup(%s)", backupClone.Name)
+			return err
 		}
-		return err
 	}
 
-	c.logger.WithField(controllerOps, utils.NamespaceAndName(backup)).
-		Info("Setting up backup log")
+	if backupClone.DeletionTimestamp != nil {
+		return ctrl.deleteBackup(backupClone)
+	}
 
-	// Validate the Metadatalocation
-	backupProvider := backup.Spec.MetadataLocation
-	c.logger.Infof("preparing backup for provider: %s ", backupProvider)
-	backuplocation, err := c.backupLocationClient.Get(context.Background(), backupProvider, metav1.GetOptions{})
+	// TODO (Amit Roushan): Add check for already processed backup
+	return ctrl.syncBackup(backupClone)
+}
+
+func (ctrl *controller) deleteBackup(backup *kahuapi.Backup) error {
+	ctrl.logger.Infof("Initiating backup(%s) delete", backup.Name)
+
+	err := ctrl.removeVolumeBackup(backup)
 	if err != nil {
-		c.logger.Errorf("failed to validate backup location, reason: %s", err)
-		backup.Status.Phase = v1beta1.BackupPhaseFailedValidation
-		backup.Status.ValidationErrors = append(backup.Status.ValidationErrors, fmt.Sprintf("%v", err))
-		c.updateStatus(backup, c.backupClient, backup.Status.Phase)
+		ctrl.logger.Errorf("Unable to delete volume backup. %s", err)
 		return err
 	}
-	c.logger.Debugf("the provider name in backuplocation:%s", backuplocation)
 
-	c.logger.Infof("Preparing backup request for Provider:%s", backupProvider)
-	prepareBackupReq := c.prepareBackupRequest(backup)
-
-	if len(prepareBackupReq.Status.ValidationErrors) > 0 {
-		prepareBackupReq.Status.Phase = v1beta1.BackupPhaseFailedValidation
-		c.updateStatus(prepareBackupReq.Backup, c.backupClient, prepareBackupReq.Status.Phase)
-		return err
-	} else {
-		prepareBackupReq.Status.Phase = v1beta1.BackupPhaseInProgress
+	if !utils.ContainsFinalizer(backup, annVolumeBackupDeleteCompleted) {
+		ctrl.logger.Info("Continue to delete volume backup")
+		return nil
 	}
-	prepareBackupReq.Status.StartTimestamp = &metav1.Time{Time: time.Now()}
-	c.updateStatus(prepareBackupReq.Backup, c.backupClient, prepareBackupReq.Status.Phase)
 
-	// start taking backup
-	err = c.runBackup(prepareBackupReq)
+	err = ctrl.deleteMetadataBackup(backup)
 	if err != nil {
-		prepareBackupReq.Status.Phase = v1beta1.BackupPhaseFailed
-	} else {
-		prepareBackupReq.Status.Phase = v1beta1.BackupPhaseCompleted
+		ctrl.logger.Errorf("Unable to delete meta backup. %s", err)
+		return err
 	}
-	prepareBackupReq.Status.LastBackup = &metav1.Time{Time: time.Now()}
 
-	c.logger.Infof("completed backup with status: %s", prepareBackupReq.Status.Phase)
-	c.updateStatus(prepareBackupReq.Backup, c.backupClient, prepareBackupReq.Status.Phase)
+	backupUpdate := backup.DeepCopy()
+	utils.RemoveFinalizer(backupUpdate, backupFinalizer)
+	_, err = ctrl.patchBackup(backup, backupUpdate)
+	if err != nil {
+		ctrl.logger.Errorf("removing finalizer failed for %s", backup.Name)
+	}
 	return err
 }
 
-func (c *controller) prepareBackupRequest(backup *v1beta1.Backup) *PrepareBackup {
-	backupRequest := &PrepareBackup{
-		Backup: backup.DeepCopy(),
+func (ctrl *controller) syncBackup(backup *kahuapi.Backup) error {
+	if backup.Status.State == kahuapi.BackupStateDeleting {
+		return nil
 	}
 
-	if backupRequest.Annotations == nil {
-		backupRequest.Annotations = make(map[string]string)
+	ctrl.logger.Infof("Validating backup(%s) specifications", backup.Name)
+	err := ctrl.validateBackup(backup)
+	if err != nil {
+		return err
 	}
 
-	if backupRequest.Labels == nil {
-		backupRequest.Labels = make(map[string]string)
+	// preprocess backup spec and try to get all backup resources
+	backupContext := newContext(backup, ctrl)
+	err = backupContext.Complete()
+	if err != nil {
+		ctrl.logger.Errorf("Unable to filter resources. %s", err)
+		return err
 	}
 
-	// validate the resources from include and exlude list
-	var includedresourceKindList []string
-	var excludedresourceKindList []string
-
-	for _, resource := range backupRequest.Spec.IncludedResources {
-		includedresourceKindList = append(includedresourceKindList, resource.Kind)
+	// sync resources with backup.Status.Resources
+	backup, err = backupContext.SyncResources(backup)
+	if err != nil {
+		ctrl.logger.Errorf("Update backup(%s) processing: failed to "+
+			"sync backup resources for volume backup", backup.Name)
+		return err
 	}
 
-	if len(includedresourceKindList) == 0 {
-		for _, resource := range backupRequest.Spec.ExcludedResources {
-			excludedresourceKindList = append(excludedresourceKindList, resource.Kind)
+	return ctrl.syncVolumeBackup(backup, backupContext)
+}
+
+func (ctrl *controller) syncVolumeBackup(
+	backup *kahuapi.Backup,
+	backupContext Context) (err error) {
+
+	pvs := backupContext.GetKindResources(PVKind)
+
+	if completed, err := ctrl.isVolumeBackupCompleted(backup.Name, len(pvs)); err != nil {
+
+	} else if completed {
+		// move to resource backup
+		return ctrl.syncResourceBackup(backup, backupContext)
+	}
+
+	// check if volume backup required
+	if metav1.HasAnnotation(backup.ObjectMeta, annVolumeBackupCompleted) {
+		backup, err = ctrl.updateBackupStatusWithEvent(backup,
+			kahuapi.BackupStatus{Stage: kahuapi.BackupStageResources},
+			v1.EventTypeNormal, "VolumeBackupSuccess", "Volume backup successful")
+		if err != nil {
+			ctrl.logger.Errorf("Unable to update backup status. %s", err)
+			return err
 		}
 	}
 
-	ResultantResource = utils.GetResultantItems(utils.SupportedResourceList, includedresourceKindList, excludedresourceKindList)
-
-	// validate the namespace from include and exlude list
-	for _, err := range utils.ValidateNamespace(backupRequest.Spec.IncludedNamespaces, backupRequest.Spec.ExcludedNamespaces) {
-		backupRequest.Status.ValidationErrors = append(backupRequest.Status.ValidationErrors, fmt.Sprintf("Include/Exclude namespace list is not valid: %v", err))
+	backup, err = ctrl.updateBackupStatusWithEvent(backup, kahuapi.BackupStatus{
+		Stage: kahuapi.BackupStageVolumes,
+	}, v1.EventTypeNormal, string(kahuapi.BackupStageInitial),
+		"Backup validation success")
+	if err != nil {
+		return err
 	}
 
-	var allNamespace []string
-	if len(backupRequest.Spec.IncludedNamespaces) == 0 {
-		allNamespace, _ = c.ListNamespaces(backupRequest)
+	err = ctrl.processVolumeBackup(backup, backupContext)
+	if err != nil {
+		return err
 	}
-	ResultantNamespace = utils.GetResultantItems(allNamespace, backupRequest.Spec.IncludedNamespaces, backupRequest.Spec.ExcludedNamespaces)
-
-	// till now validation is ok. Set the backupphase as New to start backup
-	backupRequest.Status.Phase = v1beta1.BackupPhaseInit
-
-	return backupRequest
+	// populate all meta service
+	backup, err = ctrl.updateBackupStatusWithEvent(backup, kahuapi.BackupStatus{
+		State: kahuapi.BackupStateProcessing,
+	}, v1.EventTypeNormal, string(kahuapi.BackupStageVolumes),
+		"Volume backup Scheduled")
+	return err
 }
 
-func (c *controller) updateStatus(bkp *v1beta1.Backup, client kahuv1client.BackupInterface, phase v1beta1.BackupPhase) {
+func (ctrl *controller) isVolumeBackupCompleted(
+	backupName string,
+	volumeCount int) (bool, error) {
+	vbContents, err := ctrl.volumeBackupClient.List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.Set{volumeContentBackupLabel: backupName}.String(),
+	})
+	if err != nil {
+		ctrl.logger.Errorf("Unable to list volume backup content for backup(%s). %s",
+			backupName, err)
+		return false, errors.Wrap(err, fmt.Sprintf(
+			"Unable to get volume backup list for backup(%s)", backupName))
+	}
+
+	return len(vbContents.Items) == volumeCount, nil
+}
+
+func (ctrl *controller) syncResourceBackup(
+	backup *kahuapi.Backup,
+	backupContext Context) (err error) {
+
+	err = ctrl.processMetadataBackup(backup)
+	if err != nil {
+		return err
+	}
+	// populate all meta service
+	backup, err = ctrl.updateBackupStatusWithEvent(backup, kahuapi.BackupStatus{
+		Stage: kahuapi.BackupStageFinished,
+	}, v1.EventTypeNormal, string(kahuapi.BackupStageResources),
+		"Metdata backup success")
+	if err != nil {
+		return err
+	}
+
+	return err
+}
+
+func (ctrl *controller) validateBackup(backup *kahuapi.Backup) error {
+	var validationErrors []string
+	// namespace validation
+	includeNamespaces := sets.NewString(backup.Spec.IncludeNamespaces...)
+	excludeNamespaces := sets.NewString(backup.Spec.ExcludeNamespaces...)
+	// check common namespace name in include/exclude list
+	if intersection := includeNamespaces.Intersection(excludeNamespaces); intersection.Len() > 0 {
+		validationErrors = append(validationErrors,
+			fmt.Sprintf("common namespace name (%s) in include and exclude namespace list",
+				strings.Join(intersection.List(), ",")))
+	}
+
+	// resource validation
+	// include resource validation
+	for _, resourceSpec := range backup.Spec.IncludeResources {
+		if _, err := regexp.Compile(resourceSpec.Name); err != nil {
+			validationErrors = append(validationErrors,
+				fmt.Sprintf("invalid include resource expression (%s)", resourceSpec.Name))
+		}
+	}
+
+	// exclude resource validation
+	for _, resourceSpec := range backup.Spec.ExcludeResources {
+		if _, err := regexp.Compile(resourceSpec.Name); err != nil {
+			validationErrors = append(validationErrors,
+				fmt.Sprintf("invalid exclude resource expression (%s)", resourceSpec.Name))
+		}
+	}
+
+	if len(validationErrors) == 0 {
+		return nil
+	}
+
+	ctrl.logger.Errorf("Backup validation failed. %s", strings.Join(validationErrors, ", "))
+	_, err := ctrl.updateBackupStatusWithEvent(backup, kahuapi.BackupStatus{
+		State:            kahuapi.BackupStateFailed,
+		ValidationErrors: validationErrors,
+	}, v1.EventTypeWarning, string(kahuapi.BackupStateFailed),
+		fmt.Sprintf("Backup validation failed. %s", strings.Join(validationErrors, ", ")))
+
+	return errors.Wrap(err, "backup validation failed")
+}
+
+func isBackupInitNeeded(backup *kahuapi.Backup) bool {
+	if !utils.ContainsFinalizer(backup, backupFinalizer) ||
+		backup.Status.Stage == "" ||
+		backup.Status.Stage == kahuapi.BackupStageInitial {
+		return true
+	}
+
+	return false
+}
+
+func (ctrl *controller) backupInitialize(backup *kahuapi.Backup) (*kahuapi.Backup, error) {
+	var err error
+	backupClone := backup.DeepCopy()
+
+	if !utils.ContainsFinalizer(backup, backupFinalizer) {
+		utils.SetFinalizer(backupClone, backupFinalizer)
+		backupClone, err = ctrl.patchBackup(backup, backupClone)
+		if err != nil {
+			ctrl.logger.Errorf("Unable to update finalizer for backup(%s)", backup.Name)
+			return backup, errors.Wrap(err, "Unable to update finalizer")
+		}
+	}
+
+	if backupClone.Status.Stage == "" {
+		backupClone.Status.Stage = kahuapi.BackupStageInitial
+	}
+	if backup.Status.StartTimestamp == nil {
+		time := metav1.Now()
+		backupClone.Status.StartTimestamp = &time
+	}
+	return ctrl.updateBackupStatus(backupClone, backupClone.Status)
+}
+
+func (ctrl *controller) patchBackup(oldBackup, newBackup *kahuapi.Backup) (*kahuapi.Backup, error) {
+	origBytes, err := json.Marshal(oldBackup)
+	if err != nil {
+		return nil, errors.Wrap(err, "error marshalling original backup")
+	}
+
+	updatedBytes, err := json.Marshal(newBackup)
+	if err != nil {
+		return nil, errors.Wrap(err, "error marshalling updated backup")
+	}
+
+	patchBytes, err := jsonpatch.CreateMergePatch(origBytes, updatedBytes)
+	if err != nil {
+		return nil, errors.Wrap(err, "error creating json merge patch for backup")
+	}
+
+	updatedBackup, err := ctrl.backupClient.Patch(context.TODO(),
+		oldBackup.Name,
+		types.MergePatchType,
+		patchBytes,
+		metav1.PatchOptions{})
+	if err != nil {
+		return nil, errors.Wrap(err, "error patching backup")
+	}
+
+	return updatedBackup, nil
+}
+
+func (ctrl *controller) updateBackupStatus(
+	backup *kahuapi.Backup,
+	status kahuapi.BackupStatus) (*kahuapi.Backup, error) {
+	var err error
+
+	backupClone := backup.DeepCopy()
+	dirty := false
+	// update Phase
+	if status.Stage != "" && toIota(backup.Status.Stage) < toIota(status.Stage) {
+		backupClone.Status.Stage = status.Stage
+		dirty = true
+	}
+
+	if status.State != "" && backup.Status.State != status.State {
+		backupClone.Status.State = status.State
+		dirty = true
+	}
+
+	// update Validation error
+	if len(status.ValidationErrors) > 0 {
+		backupClone.Status.ValidationErrors = append(backupClone.Status.ValidationErrors,
+			status.ValidationErrors...)
+		dirty = true
+	}
+
+	// update Start time
+	if backup.Status.StartTimestamp == nil {
+		backupClone.Status.StartTimestamp = status.StartTimestamp
+		dirty = true
+	}
+
+	if backup.Status.LastBackup == nil &&
+		status.LastBackup != nil {
+		backupClone.Status.LastBackup = status.LastBackup
+		dirty = true
+	}
+
+	if len(backupClone.Status.Resources) == 0 {
+		backupClone.Status.Resources = append(backupClone.Status.Resources,
+			status.Resources...)
+		dirty = true
+	}
+
+	if dirty {
+		backupClone, err = ctrl.backupClient.UpdateStatus(context.TODO(), backupClone, metav1.UpdateOptions{})
+		if err != nil {
+			ctrl.logger.Errorf("updating backup(%s) status: update status failed %s", backup.Name, err)
+		}
+	}
+
+	return backupClone, err
+}
+
+func (ctrl *controller) updateBackupStatusWithEvent(
+	backup *kahuapi.Backup,
+	status kahuapi.BackupStatus,
+	eventType, reason, message string) (*kahuapi.Backup, error) {
+
+	newBackup, err := ctrl.updateBackupStatus(backup, status)
+	if err != nil {
+		return newBackup, err
+	}
+
+	if newBackup.ResourceVersion != backup.ResourceVersion {
+		ctrl.logger.Infof("backup %s changed phase to %q: %s", backup.Name, status.Stage, message)
+		ctrl.eventRecorder.Event(newBackup, eventType, reason, message)
+	}
+	return newBackup, err
+}
+
+
+
+
+func (c *controller) updateStatus(bkp *kahuapi.Backup, client kahuv1client.BackupInterface, status kahuapi.BackupStatus) {
 	backup, err := client.Get(context.Background(), bkp.Name, metav1.GetOptions{})
 	if err != nil {
 		c.logger.Errorf("failed to get backup for updating status :%+s", err)
 		return
 	}
 
-	if backup.Status.Phase == v1beta1.BackupPhaseCompleted && phase == v1beta1.BackupPhaseFailed {
-		backup.Status.Phase = v1beta1.BackupPhasePartiallyFailed
-	} else if backup.Status.Phase == v1beta1.BackupPhasePartiallyFailed {
-		backup.Status.Phase = v1beta1.BackupPhasePartiallyFailed
-	} else {
-		backup.Status.Phase = phase
+	if backup.Status.Stage == kahuapi.BackupStageFinished {
+		// no need to update as backup completed
+		return
 	}
-	backup.Status.ValidationErrors = bkp.Status.ValidationErrors
+
+	if status.State != "" && status.State != backup.Status.State {
+		backup.Status.State = status.State
+	}
+
+	if status.Stage != "" && status.Stage != backup.Status.Stage {
+		backup.Status.Stage = status.Stage
+	}
+
+	if len(status.ValidationErrors) > 0 {
+		backup.Status.ValidationErrors = status.ValidationErrors
+	}
+
+	if backup.Status.StartTimestamp == nil && status.StartTimestamp != nil {
+		backup.Status.StartTimestamp = status.StartTimestamp
+	}
+
+	if backup.Status.LastBackup == nil && status.LastBackup != nil {
+		backup.Status.LastBackup = status.LastBackup
+	}
+
 	_, err = client.UpdateStatus(context.Background(), backup, metav1.UpdateOptions{})
 	if err != nil {
 		c.logger.Errorf("failed to update backup status :%+s", err)
@@ -236,171 +517,19 @@ func (c *controller) updateStatus(bkp *v1beta1.Backup, client kahuv1client.Backu
 	return
 }
 
-func (c *controller) runBackup(backup *PrepareBackup) error {
-	c.logger.Infoln("starting to run backup")
 
-	backupClient := utils.GetMetaserviceBackupClient(c.config.MetaServiceAddress, c.config.MetaServicePort)
 
-	err := backupClient.Send(&metaservice.BackupRequest{
-		Backup: &metaservice.BackupRequest_Identifier{
-			Identifier: &metaservice.BackupIdentifier{
-				BackupHandle: backup.Name,
-			},
-		},
-	})
-
-	if err != nil {
-		c.logger.Errorf("Unable to connect metadata service %s", err)
-		return err
-	}
-
-	resultantResource := sets.NewString(ResultantResource...)
-	resultantNamespace := sets.NewString(ResultantNamespace...)
-	c.logger.Infof("backup will be taken for these resources:%s", resultantResource)
-	c.logger.Infof("backup will be taken for these namespaces:%s", resultantNamespace)
-
-	for ns, nsVal := range resultantNamespace {
-		c.logger.Infof("started backup for namespace:%s", ns)
-		for name, val := range resultantResource {
-			c.logger.Debug(nsVal, val)
-			switch name {
-			case "deployments":
-				err = c.deploymentBackup(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-				c.updateStatus(backup.Backup, c.backupClient, backup.Status.Phase)
-			case "configmaps":
-				err = c.getConfigMapS(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "persistentvolumeclaims":
-				err = c.getPersistentVolumeClaims(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "storageclasses":
-				err = c.getStorageClass(backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "services":
-				err = c.getServices(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "secrets":
-				err = c.getSecrets(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "endpoints":
-				err = c.getEndpoints(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "replicasets":
-				err = c.getReplicasets(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			case "statefulsets":
-				err = c.getStatefulsets(ns, backup, backupClient)
-				if err != nil {
-					backup.Status.Phase = v1beta1.BackupPhaseFailed
-				} else {
-					backup.Status.Phase = v1beta1.BackupPhaseCompleted
-				}
-			default:
-				continue
-			}
-		}
-	}
-	_, err = backupClient.CloseAndRecv()
-
-	return err
-}
-
-// sortCoreGroup sorts the core API group.
-func sortCoreGroup(group *metav1.APIResourceList) {
-	sort.SliceStable(group.APIResources, func(i, j int) bool {
-		return CoreGroupResourcePriority(group.APIResources[i].Name) < CoreGroupResourcePriority(group.APIResources[j].Name)
-	})
-}
-
-func (c *controller) backupSend(obj runtime.Object, metadataName string,
-	backupSendClient metaservice.MetaService_BackupClient) error {
-
-	gvk, err := addTypeInformationToObject(obj)
-	if err != nil {
-		c.logger.Errorf("Unable to get gvk: %s", err)
-		return err
-	}
-
-	resourceData, err := json.Marshal(obj)
-	if err != nil {
-		c.logger.Errorf("Unable to get resource content: %s", err)
-		return err
-	}
-
-	c.logger.Infof("sending metadata for object %s/%s", gvk, metadataName)
-
-	err = backupSendClient.Send(&metaservice.BackupRequest{
-		Backup: &metaservice.BackupRequest_BackupResource{
-			BackupResource: &metaservice.BackupResource{
-				Resource: &metaservice.Resource{
-					Name:    metadataName,
-					Group:   gvk.Group,
-					Version: gvk.Version,
-					Kind:    gvk.Kind,
-				},
-				Data: resourceData,
-			},
-		},
-	})
-	return err
-}
-
-func (c *controller) deleteBackup(name string, backup *v1beta1.Backup) {
-	// TODO: delete need to be added
-	c.logger.Infof("delete is called for backup:%s", name)
-
-}
 
 func (c *controller) handleAdd(obj interface{}) {
-	backup := obj.(*v1beta1.Backup)
-
-	switch backup.Status.Phase {
-	case "", v1beta1.BackupPhaseInit:
-	default:
-		c.logger.WithFields(log.Fields{
-			"backup": utils.NamespaceAndName(backup),
-			"phase":  backup.Status.Phase,
-		}).Infof("Backup: %s is not New, so will not be processed", backup.Name)
-		return
-	}
 	c.genericController.Enqueue(obj)
 }
 
-func (c *controller) handleDel(obj interface{}) {
-	c.genericController.Enqueue(obj)
+func (c *controller) handleUpdate(oldobj, obj interface{}) {
+	backup := obj.(*kahuapi.Backup)
+
+	if backup.DeletionTimestamp != nil {
+		c.deleteBackup(backup)
+	}
 }
 
 // addTypeInformationToObject adds TypeMeta information to a runtime.Object based upon the loaded scheme.Scheme

@@ -27,33 +27,33 @@ import (
 	"github.com/spf13/pflag"
 	"google.golang.org/grpc"
 
-	nfs_provider "github.com/soda-cdm/kahu/providers/lib/go"
-	"github.com/soda-cdm/kahu/providers/nfs_provider/server/options"
+	pb "github.com/soda-cdm/kahu/providers/lib/go"
+	"github.com/soda-cdm/kahu/providers/samplevolumeprovider/server/options"
 	"github.com/soda-cdm/kahu/utils"
 	logOptions "github.com/soda-cdm/kahu/utils/logoptions"
 )
 
 const (
-	// NFSService component name
-	componentNFSService = "nfs_provider"
+	// Volume Service component name
+	componentService = "sample-volume-provider"
 )
 
-// NewNFSProviderCommand creates a *cobra.Command object with default parameters
-func NewNFSProviderCommand() *cobra.Command {
-	cleanFlagSet := pflag.NewFlagSet(componentNFSService, pflag.ContinueOnError)
+// NewProviderCommand creates a *cobra.Command object with default parameters
+func NewProviderCommand() *cobra.Command {
+	cleanFlagSet := pflag.NewFlagSet(componentService, pflag.ContinueOnError)
 
-	nfsServiceFlags := options.NewNFSServiceFlags()
+	serviceFlags := options.NewServiceFlags()
 	loggingOptions := logOptions.NewLogOptions()
 
 	cmd := &cobra.Command{
-		Use:  componentNFSService,
-		Long: `The NFS Provider server`,
+		Use:  componentService,
+		Long: `Sample volume backup driver`,
 		// Disabled flag parsing from cobra framework
 		DisableFlagParsing: true,
 		Run: func(cmd *cobra.Command, args []string) {
 			// initial flag parse, since we disable cobra's flag parsing
 			if err := cleanFlagSet.Parse(args); err != nil {
-				log.Error("Failed to parse nfs provider service flag ", err)
+				log.Error("Failed to parse provider service flag ", err)
 				_ = cmd.Usage()
 				os.Exit(1)
 			}
@@ -77,9 +77,9 @@ func NewNFSProviderCommand() *cobra.Command {
 				return
 			}
 
-			// validate and apply initial NFSService Flags
-			if err := nfsServiceFlags.Apply(); err != nil {
-				log.Error("Failed to validate nfs provider service flags ", err)
+			// validate and apply initial service Flags
+			if err := serviceFlags.Apply(); err != nil {
+				log.Error("Failed to validate provider service flags ", err)
 				os.Exit(1)
 			}
 
@@ -89,13 +89,12 @@ func NewNFSProviderCommand() *cobra.Command {
 				os.Exit(1)
 			}
 
-			// TODO: Setup signal handler with context
 			ctx, cancel := context.WithCancel(context.Background())
 			// setup signal handler
 			utils.SetupSignalHandler(cancel)
 
 			// run the meta service
-			if err := Run(ctx, options.NFSProviderOptions{NFSServiceFlags: *nfsServiceFlags}); err != nil {
+			if err := Run(ctx, *serviceFlags); err != nil {
 				log.Error("Failed to run nfs provider service", err)
 				os.Exit(1)
 			}
@@ -103,7 +102,7 @@ func NewNFSProviderCommand() *cobra.Command {
 		},
 	}
 
-	nfsServiceFlags.AddFlags(cleanFlagSet)
+	serviceFlags.AddFlags(cleanFlagSet)
 	// add logging flags
 	loggingOptions.AddFlags(cleanFlagSet)
 	cleanFlagSet.BoolP("help", "h", false, fmt.Sprintf("help for %s", cmd.Name()))
@@ -121,23 +120,28 @@ func NewNFSProviderCommand() *cobra.Command {
 	return cmd
 }
 
-func Run(ctx context.Context, serviceOptions options.NFSProviderOptions) error {
+func Run(ctx context.Context, serviceOptions options.ServiceFlags) error {
 	log.Info("Starting Server ...")
+	serviceOptions.Print()
 
-	server_addr, err := net.ResolveUnixAddr("unix", serviceOptions.UnixSocketPath)
+	serverAddr, err := net.ResolveUnixAddr("unix", serviceOptions.UnixSocketPath)
 	if err != nil {
 		log.Fatal("failed to resolve unix addr")
 	}
-	lis, err := net.ListenUnix("unix", server_addr)
+
+	lis, err := net.ListenUnix("unix", serverAddr)
 	if err != nil {
 		log.Fatal("failed to listen: ", err)
 	}
 
+	service := NewVolumeBackupService(ctx)
+
 	var opts []grpc.ServerOption
 	grpcServer := grpc.NewServer(opts...)
-	nfs_provider.RegisterMetaBackupServer(grpcServer, NewMetaBackupServer(ctx, serviceOptions))
-	nfs_provider.RegisterIdentityServer(grpcServer, NewIdentityServer(ctx, serviceOptions))
+	pb.RegisterVolumeBackupServer(grpcServer, service)
+	pb.RegisterIdentityServer(grpcServer, service)
 
+	// graceful close when context close
 	go func(ctx context.Context, server *grpc.Server) {
 		<-ctx.Done()
 		server.Stop()

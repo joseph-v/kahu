@@ -30,6 +30,7 @@ type KahuV1beta1Interface interface {
 	BackupLocationsGetter
 	ProvidersGetter
 	RestoresGetter
+	VolumeBackupContentsGetter
 }
 
 // KahuV1beta1Client is used to interact with features provided by the kahu.io group.
@@ -51,6 +52,10 @@ func (c *KahuV1beta1Client) Providers() ProviderInterface {
 
 func (c *KahuV1beta1Client) Restores() RestoreInterface {
 	return newRestores(c)
+}
+
+func (c *KahuV1beta1Client) VolumeBackupContents() VolumeBackupContentInterface {
+	return newVolumeBackupContents(c)
 }
 
 // NewForConfig creates a new KahuV1beta1Client for the given config.

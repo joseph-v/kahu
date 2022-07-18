@@ -34,6 +34,9 @@ import (
 	pb "github.com/soda-cdm/kahu/providerframework/metaservice/lib/go"
 	"github.com/soda-cdm/kahu/utils"
 )
+const (
+	archiveFileFormat = ".tar"
+)
 
 type metaServer struct {
 	ctx            context.Context
@@ -57,23 +60,16 @@ func NewMetaServiceServer(ctx context.Context,
 func (server *metaServer) Backup(service pb.MetaService_BackupServer) error {
 	log.Info("Backup Called .... ")
 
-	backupRequest, err := service.Recv()
+	backupHandle, err := getBackupHandle(service)
 	if err != nil {
-		return status.Errorf(codes.Unknown, "failed with error %s", err)
+		return status.Errorf(codes.Unknown, "failed to get backup handle %s", err)
 	}
 
-	identifier := backupRequest.GetIdentifier()
-	if identifier == nil {
-		return status.Errorf(codes.InvalidArgument, "first request is not backup identifier")
-	}
-
-	// use backup handle name for file
-	backupHandle := identifier.GetBackupHandle()
-	// TODO: check backup location info
+	archiveFileName := backupHandle + archiveFileFormat
 
 	archiveHandler, archiveFile, err := server.archiveManager.
 		GetArchiver(archiver.CompressionType(server.options.CompressionFormat),
-			backupHandle)
+		archiveFileName)
 	if archiveHandler == nil || err != nil {
 		log.Errorf("failed to create archiver %s", err)
 		return status.Errorf(codes.Internal, "failed to create archiver %s", err)
@@ -91,9 +87,9 @@ func (server *metaServer) Backup(service pb.MetaService_BackupServer) error {
 		}
 
 		resource := backupRequest.GetBackupResource().GetResource()
-		log.Infof("Resource Indo %+v", resource)
+		log.Infof("Resource Info %+v", resource)
 		resourceData := backupRequest.GetBackupResource().GetData()
-		err = archiveHandler.WriteFile(utils.ResourceToFile(resource), resourceData)
+		err = archiveHandler.WriteFile(utils.ResourceToFile(backupHandle, resource), resourceData)
 		if err != nil {
 			log.Errorf("failed to write file. %s", err)
 			return status.Errorf(codes.Internal, "failed to write file. %s", err)
@@ -121,6 +117,38 @@ func (server *metaServer) Backup(service pb.MetaService_BackupServer) error {
 	return nil
 }
 
+func (server *metaServer) Delete(ctxt context.Context, req *pb.DeleteRequest) (*pb.Empty, error) {
+	log.Info("Delete backup Called .... ")
+
+	empty := &pb.Empty{}
+	backupHandle := req.GetId().BackupHandle
+	parameters := req.GetId().Parameters
+	err := server.backupRepo.Delete(backupHandle + archiveFileFormat, parameters)
+	if err != nil {
+		log.Errorf("failed to delete backup. %s", err)
+		return empty, status.Errorf(codes.Internal, "failed to delete backup. %s", err)
+	}
+
+	return empty, err
+}
+
+
+func getBackupHandle(service pb.MetaService_BackupServer) (string, error) {
+	backupRequest, err := service.Recv()
+	if err != nil {
+		return "", status.Errorf(codes.Unknown, "failed with error %s", err)
+	}
+
+	identifier := backupRequest.GetIdentifier()
+	if identifier == nil {
+		return "", status.Errorf(codes.InvalidArgument, "first request is not backup identifier")
+	}
+
+	// use backup handle name for file
+	backupHandle := identifier.GetBackupHandle()
+	return backupHandle, nil
+}
+
 func deleteFile(filePath string) {
 	err := os.Remove(filePath)
 	if err != nil {
@@ -132,8 +160,10 @@ func (server *metaServer) Restore(req *pb.RestoreRequest,
 	service pb.MetaService_RestoreServer) error {
 	log.Infof("Restore Called with request %+v", req)
 
+	archiveFileName := req.GetId().GetBackupHandle() + archiveFileFormat
+
 	// download backup file
-	filePath, err := server.backupRepo.Download(req.GetId().GetBackupHandle(), req.GetId().GetParameters())
+	filePath, err := server.backupRepo.Download(archiveFileName, req.GetId().GetParameters())
 	if err != nil {
 		log.Errorf("failed to upload backup. %s", err)
 		return status.Errorf(codes.Internal, "failed to upload backup. %s", err)

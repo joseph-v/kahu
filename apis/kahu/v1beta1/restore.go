@@ -36,11 +36,11 @@ type RestoreSpec struct {
 
 	// IncludeResources are set of kubernetes resource name considered for restore
 	// +optional
-	IncludeResources []string `json:"includeResources,omitempty"`
+	IncludeResources []ResourceSpec `json:"includeResources,omitempty"`
 
 	// ExcludeResources are set of kubernetes resource name should not get considered for restore
 	// +optional
-	ExcludeResources []string `json:"excludeResources,omitempty"`
+	ExcludeResources []ResourceSpec `json:"excludeResources,omitempty"`
 
 	// LabelSelector are label get evaluated against resource selection
 	// +optional
@@ -59,19 +59,28 @@ type RestoreSpec struct {
 	ResourcePrefix string `json:"resourcePrefix,omitempty"`
 }
 
-// +kubebuilder:validation:Enum=New;MetadataRestore;FailedValidation;InProgress;Completed;PartiallyFailed;Failed;Deleting
+// +kubebuilder:validation:Enum=Initial;PreHook;Resources;Volumes;PostHook;Finished
 
-type RestorePhase string
+type RestoreStage string
+
+// +kubebuilder:validation:Enum=New;Validating;Failed;Processing;Completed;Deleting
+
+type RestoreState string
 
 const (
-	RestorePhaseInit             RestorePhase = "New"
-	RestorePhaseMeta             RestorePhase = "MetadataRestore"
-	RestorePhaseFailedValidation RestorePhase = "FailedValidation"
-	RestorePhaseInProgress       RestorePhase = "InProgress"
-	RestorePhaseCompleted        RestorePhase = "Completed"
-	RestorePhasePartiallyFailed  RestorePhase = "PartiallyFailed"
-	RestorePhaseFailed           RestorePhase = "Failed"
-	RestorePhaseDeleting         RestorePhase = "Deleting"
+	RestoreStageInitial   RestoreStage = "Initial"
+	RestoreStagePreHook   RestoreStage = "PreHook"
+	RestoreStageResources RestoreStage = "Resources"
+	RestoreStageVolumes   RestoreStage = "Volumes"
+	RestoreStagePostHook  RestoreStage = "PostHook"
+	RestoreStageFinished  RestoreStage = "Finished"
+
+	RestoreStateNew        RestoreState = "New"
+	RestoreStateValidating RestoreState = "Validating"
+	RestoreStateFailed     RestoreState = "Failed"
+	RestoreStateProcessing RestoreState = "Processing"
+	RestoreStateCompleted  RestoreState = "Completed"
+	RestoreStateDeleting   RestoreState = "Deleting"
 )
 
 // RestoreProgress expresses overall progress of restore
@@ -91,8 +100,11 @@ type RestoreStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file
 
 	// +optional
+	Stage RestoreStage `json:"stage,omitempty"`
+
+	// +optional
 	// +kubebuilder:default=New
-	Phase RestorePhase `json:"phase,omitempty"`
+	State RestoreState `json:"state,omitempty"`
 
 	// +optional
 	// +nullable
@@ -120,6 +132,12 @@ type RestoreStatus struct {
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="BackupName",type=string,JSONPath=`.spec.backupName`
+// +kubebuilder:printcolumn:name="Stage",type=string,JSONPath=`.status.stage`
+// +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.state`
+// +kubebuilder:printcolumn:name="StartTimestamp",type=string,JSONPath=`.status.startTimestamp`
+// +kubebuilder:printcolumn:name="CompletionTimestamp",type=string,JSONPath=`.status.completionTimestamp`
+// +kubebuilder:printcolumn:name="Age",type=string,JSONPath=`.metadata.creationTimestamp`
 
 // Restore is the Schema for the restores API
 type Restore struct {

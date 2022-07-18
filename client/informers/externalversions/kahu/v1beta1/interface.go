@@ -32,6 +32,8 @@ type Interface interface {
 	Providers() ProviderInformer
 	// Restores returns a RestoreInformer.
 	Restores() RestoreInformer
+	// VolumeBackupContents returns a VolumeBackupContentInformer.
+	VolumeBackupContents() VolumeBackupContentInformer
 }
 
 type version struct {
@@ -63,4 +65,9 @@ func (v *version) Providers() ProviderInformer {
 // Restores returns a RestoreInformer.
 func (v *version) Restores() RestoreInformer {
 	return &restoreInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// VolumeBackupContents returns a VolumeBackupContentInformer.
+func (v *version) VolumeBackupContents() VolumeBackupContentInformer {
+	return &volumeBackupContentInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }

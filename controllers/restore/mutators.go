@@ -21,7 +21,6 @@ import (
 	"reflect"
 
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"k8s.io/client-go/tools/cache"
 
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"

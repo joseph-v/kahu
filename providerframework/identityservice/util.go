@@ -51,7 +51,10 @@ func registerProvider(ctx context.Context, conn *grpc.ClientConnInterface, provi
 }
 
 // createProviderCR creates CRD entry on behalf of the provider getting added.
-func createProviderCR(providerInfo ProviderInfo, providerType apiv1beta1.ProviderType, providerCapabilities map[string]bool) error {
+func createProviderCR(
+	providerInfo ProviderInfo, 
+	providerType apiv1beta1.ProviderType, 
+	providerCapabilities map[string]bool) error {
 	cfg := kahuClient.NewFactoryConfig()
 	clientFactory := kahuClient.NewFactory(agentBaseName, cfg)
 	client, err := clientFactory.KahuClient()

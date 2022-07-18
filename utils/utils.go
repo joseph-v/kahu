@@ -19,12 +19,15 @@ import (
 	"os"
 	"os/signal"
 	"regexp"
+	"strings"
 	"syscall"
+	"time"
 
 	log "github.com/sirupsen/logrus"
-
 	"google.golang.org/grpc"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	restclient "k8s.io/client-go/rest"
@@ -32,6 +35,11 @@ import (
 
 	"github.com/soda-cdm/kahu/apis/kahu/v1beta1"
 	metaservice "github.com/soda-cdm/kahu/providerframework/metaservice/lib/go"
+	providerservice "github.com/soda-cdm/kahu/providers/lib/go"
+)
+
+const (
+	probeInterval = 1 * time.Second
 )
 
 func GetConfig(kubeConfig string) (config *restclient.Config, err error) {
@@ -92,6 +100,92 @@ func GetMetaserviceBackupClient(address string, port uint) metaservice.MetaServi
 	return backupClient
 }
 
+func GetGRPCConnection(endpoint string, dialOptions ...grpc.DialOption) (grpc.ClientConnInterface, error) {
+	dialOptions = append(dialOptions,
+		grpc.WithInsecure(),                   // unix domain connection.
+		grpc.WithBackoffMaxDelay(time.Second), // Retry every second after failure.
+		grpc.WithBlock(),                      // Block until connection succeeds.
+		grpc.WithChainUnaryInterceptor(
+			AddGRPCRequestID, // add gRPC request id
+		),
+	)
+
+	unixPrefix := "unix://"
+	if strings.HasPrefix(endpoint, "/") {
+		// It looks like filesystem path.
+		endpoint = unixPrefix + endpoint
+	}
+
+	if !strings.HasPrefix(endpoint, unixPrefix) {
+		return nil, fmt.Errorf("invalid unix domain path [%s]",
+			endpoint)
+	}
+
+	return grpc.Dial(endpoint, dialOptions...)
+}
+
+func AddGRPCRequestID(ctx context.Context,
+	method string,
+	req, reply interface{},
+	cc *grpc.ClientConn,
+	invoker grpc.UnaryInvoker,
+	opts ...grpc.CallOption) error {
+	return invoker(ctx, method, req, reply, cc, opts...)
+}
+
+func Probe(conn grpc.ClientConnInterface, timeout time.Duration) error {
+	for {
+		log.Info("Probing driver for readiness")
+		probe := func(conn grpc.ClientConnInterface, timeout time.Duration) (bool, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
+			defer cancel()
+
+			rsp, err := providerservice.
+				NewIdentityClient(conn).
+				Probe(ctx, &providerservice.ProbeRequest{})
+
+			if err != nil {
+				return false, err
+			}
+
+			r := rsp.GetReady()
+			if r == nil {
+				return true, nil
+			}
+			return r.GetValue(), nil
+		}
+
+		ready, err := probe(conn, timeout)
+		if err != nil {
+			st, ok := status.FromError(err)
+			if !ok {
+				return fmt.Errorf("driver probe failed: %s", err)
+			}
+			if st.Code() != codes.DeadlineExceeded {
+				return fmt.Errorf("driver probe failed: %s", err)
+			}
+			// Timeout -> driver is not ready. Fall through to sleep() below.
+			log.Warning("driver probe timed out")
+		}
+		if ready {
+			return nil
+		}
+		// sleep for retry again
+		time.Sleep(probeInterval)
+	}
+}
+
+
+func GetMetaserviceDeleteClient(address string, port uint) metaservice.MetaServiceClient {
+
+	grpcconn, err := metaservice.NewLBDial(fmt.Sprintf("%s:%d", address, port), grpc.WithInsecure())
+	if err != nil {
+		log.Errorf("error getting grpc connection %s", err)
+		return nil
+	}
+	return metaservice.NewMetaServiceClient(grpcconn)
+}
+
 func GetSubItemStrings(allList []string, input string, isRegex bool) []string {
 	var subItemList []string
 	if isRegex {
@@ -111,13 +205,12 @@ func GetSubItemStrings(allList []string, input string, isRegex bool) []string {
 	return subItemList
 }
 
-func FindMatchedStrings(kind string, allList []string, includeList, excludeList []v1beta1.ResourceIncluder) []string {
+func FindMatchedStrings(kind string, allList []string, includeList, excludeList []v1beta1.ResourceSpec) []string {
 	var collectAllIncludeds []string
 	var collectAllExcludeds []string
-	var resultantStrings []string
 
 	if len(includeList) == 0 {
-		resultantStrings = allList
+		collectAllIncludeds = allList
 	}
 	for _, resource := range includeList {
 		if resource.Kind == kind {
@@ -132,8 +225,8 @@ func FindMatchedStrings(kind string, allList []string, includeList, excludeList 
 		}
 	}
 	if len(collectAllIncludeds) > 0 {
-		resultantStrings = GetResultantItems(allList, collectAllIncludeds, collectAllExcludeds)
+		collectAllIncludeds = GetResultantItems(allList, collectAllIncludeds, collectAllExcludeds)
 	}
 
-	return resultantStrings
+	return collectAllIncludeds
 }

@@ -18,17 +18,16 @@ package main
 
 import (
 	"math/rand"
-	"os"
 	"time"
 
-	"github.com/soda-cdm/kahu/providers/nfs_provider/server"
+	"github.com/soda-cdm/kahu/providers/samplevolumeprovider/server"
 )
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
 
-	command := server.NewNFSProviderCommand()
+	command := server.NewProviderCommand()
 	if err := command.Execute(); err != nil {
-		os.Exit(1)
+		return
 	}
 }
