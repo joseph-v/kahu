@@ -225,7 +225,7 @@ func (ctrl *controller) getPersistentVolumeClaims(namespace string, backup *Prep
 		allPVCList = append(allPVCList, pvc.Name)
 	}
 
-	allPVCList = utils.FindMatchedStrings(utils.Pvc, allPVCList, backup.Spec.IncludeResources,
+	allPVCList = utils.FindMatchedStrings(utils.PVC, allPVCList, backup.Spec.IncludeResources,
 		backup.Spec.ExcludeResources)
 
 	for _, item := range allPVC.Items {

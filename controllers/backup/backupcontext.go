@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"github.com/soda-cdm/kahu/discovery"
+	"github.com/soda-cdm/kahu/utils"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -279,7 +280,6 @@ func (ctx *backupContext) populateCacheFromBackupSpec() error {
 	}
 
 	apiResources = ctx.getFilteredNamespacedResources(apiResources)
-
 	for _, namespace := range namespaces {
 		ctx.logger.Infof("Collecting resources for namespace %s", namespace)
 		resources, err := ctx.collectNamespaceResources(namespace, apiResources)
@@ -356,7 +356,19 @@ func (ctx *backupContext) getCachedNamespaceNames() []string {
 func (ctx *backupContext) getFilteredNamespacedResources(
 	apiResources []*metav1.APIResource) []*metav1.APIResource {
 	// TODO (Amit Roushan): Need to add filter for supported resources
-	return apiResources
+	// only support Pod, PVC and PV currently
+	filteredApiResources := make([]*metav1.APIResource, 0)
+
+	for _, apiResource := range apiResources {
+		switch apiResource.Kind {
+		case utils.Pod, utils.PVC:
+			filteredApiResources = append(filteredApiResources, apiResource)
+		default:
+			ctx.logger.Debugf("Ignoring Api resource %s", apiResource.Kind)
+		}
+	}
+
+	return filteredApiResources
 }
 
 func (ctx *backupContext) applyResourceFilters(

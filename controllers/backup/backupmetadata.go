@@ -189,7 +189,7 @@ func (ctrl *controller) runBackup(backup *PrepareBackup) error {
 				} else {
 					backup.Status.Stage = kahuapi.BackupStageFinished
 				}
-			case utils.Pvc:
+			case utils.PVC:
 				err = ctrl.getPersistentVolumeClaims(ns, backup, backupClient)
 				if err != nil {
 					backup.Status.State = kahuapi.BackupStateFailed

@@ -30,14 +30,14 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/client-go/kubernetes/scheme"
 
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
 	"github.com/soda-cdm/kahu/client/clientset/versioned"
@@ -63,6 +63,7 @@ type controller struct {
 	discoveryHelper      discovery.DiscoveryHelper
 	providerLister       kahulister.ProviderLister
 	volumeBackupClient   kahuv1client.VolumeBackupContentInterface
+	volumeBackupLister   kahulister.VolumeBackupContentLister
 }
 
 func NewController(
@@ -86,6 +87,7 @@ func NewController(
 		discoveryHelper:      discoveryHelper,
 		providerLister:       informer.Kahu().V1beta1().Providers().Lister(),
 		volumeBackupClient:   kahuClient.KahuV1beta1().VolumeBackupContents(),
+		volumeBackupLister:   informer.Kahu().V1beta1().VolumeBackupContents().Lister(),
 	}
 
 	// construct controller interface to process worker queue
@@ -143,7 +145,12 @@ func (ctrl *controller) processQueue(key string) error {
 		return errors.Wrap(err, fmt.Sprintf("error getting backup %s from lister", name))
 	}
 
+	// TODO (Amit Roushan): Add check for already processed backup
 	backupClone := backup.DeepCopy()
+	if backupClone.DeletionTimestamp != nil {
+		return ctrl.deleteBackup(backupClone)
+	}
+
 	// setup finalizer if not present
 	if isBackupInitNeeded(backupClone) {
 		backupClone, err = ctrl.backupInitialize(backupClone)
@@ -153,11 +160,6 @@ func (ctrl *controller) processQueue(key string) error {
 		}
 	}
 
-	if backupClone.DeletionTimestamp != nil {
-		return ctrl.deleteBackup(backupClone)
-	}
-
-	// TODO (Amit Roushan): Add check for already processed backup
 	return ctrl.syncBackup(backupClone)
 }
 
@@ -170,8 +172,15 @@ func (ctrl *controller) deleteBackup(backup *kahuapi.Backup) error {
 		return err
 	}
 
-	if !utils.ContainsFinalizer(backup, annVolumeBackupDeleteCompleted) {
-		ctrl.logger.Info("Continue to delete volume backup")
+	// check if all volume backup contents are deleted
+	vbsList, err := ctrl.volumeBackupLister.List(
+		labels.Set{ volumeContentBackupLabel: backup.Name}.AsSelector())
+	if err != nil {
+		ctrl.logger.Errorf("Unable to get volume backup list. %s", err)
+		return err
+	}
+	if len(vbsList) > 0 {
+		ctrl.logger.Errorf("Volume backup list is not empty. Continue to wait for Volume backup delete")
 		return nil
 	}
 
@@ -201,6 +210,25 @@ func (ctrl *controller) syncBackup(backup *kahuapi.Backup) error {
 		return err
 	}
 
+	ctrl.logger.Infof("Backup validation successful")
+	return ctrl.syncVolumeBackup(backup)
+}
+
+func (ctrl *controller) syncVolumeBackup(
+	backup *kahuapi.Backup) (err error) {
+	// check if volume backup required
+	if metav1.HasAnnotation(backup.ObjectMeta, annVolumeBackupCompleted) {
+		backup, err = ctrl.updateBackupStatusWithEvent(backup,
+			kahuapi.BackupStatus{Stage: kahuapi.BackupStageResources},
+			v1.EventTypeNormal, "VolumeBackupSuccess", "Volume backup successful")
+		if err != nil {
+			ctrl.logger.Errorf("Unable to update backup status. %s", err)
+			return err
+		}
+
+		return ctrl.syncResourceBackup(backup)
+	}
+
 	// preprocess backup spec and try to get all backup resources
 	backupContext := newContext(backup, ctrl)
 	err = backupContext.Complete()
@@ -215,33 +243,6 @@ func (ctrl *controller) syncBackup(backup *kahuapi.Backup) error {
 		ctrl.logger.Errorf("Update backup(%s) processing: failed to "+
 			"sync backup resources for volume backup", backup.Name)
 		return err
-	}
-
-	return ctrl.syncVolumeBackup(backup, backupContext)
-}
-
-func (ctrl *controller) syncVolumeBackup(
-	backup *kahuapi.Backup,
-	backupContext Context) (err error) {
-
-	pvs := backupContext.GetKindResources(PVKind)
-
-	if completed, err := ctrl.isVolumeBackupCompleted(backup.Name, len(pvs)); err != nil {
-
-	} else if completed {
-		// move to resource backup
-		return ctrl.syncResourceBackup(backup, backupContext)
-	}
-
-	// check if volume backup required
-	if metav1.HasAnnotation(backup.ObjectMeta, annVolumeBackupCompleted) {
-		backup, err = ctrl.updateBackupStatusWithEvent(backup,
-			kahuapi.BackupStatus{Stage: kahuapi.BackupStageResources},
-			v1.EventTypeNormal, "VolumeBackupSuccess", "Volume backup successful")
-		if err != nil {
-			ctrl.logger.Errorf("Unable to update backup status. %s", err)
-			return err
-		}
 	}
 
 	backup, err = ctrl.updateBackupStatusWithEvent(backup, kahuapi.BackupStatus{
@@ -264,25 +265,8 @@ func (ctrl *controller) syncVolumeBackup(
 	return err
 }
 
-func (ctrl *controller) isVolumeBackupCompleted(
-	backupName string,
-	volumeCount int) (bool, error) {
-	vbContents, err := ctrl.volumeBackupClient.List(context.TODO(), metav1.ListOptions{
-		LabelSelector: labels.Set{volumeContentBackupLabel: backupName}.String(),
-	})
-	if err != nil {
-		ctrl.logger.Errorf("Unable to list volume backup content for backup(%s). %s",
-			backupName, err)
-		return false, errors.Wrap(err, fmt.Sprintf(
-			"Unable to get volume backup list for backup(%s)", backupName))
-	}
-
-	return len(vbContents.Items) == volumeCount, nil
-}
-
 func (ctrl *controller) syncResourceBackup(
-	backup *kahuapi.Backup,
-	backupContext Context) (err error) {
+	backup *kahuapi.Backup) (err error) {
 
 	err = ctrl.processMetadataBackup(backup)
 	if err != nil {
@@ -474,13 +458,10 @@ func (ctrl *controller) updateBackupStatusWithEvent(
 	return newBackup, err
 }
 
-
-
-
-func (c *controller) updateStatus(bkp *kahuapi.Backup, client kahuv1client.BackupInterface, status kahuapi.BackupStatus) {
+func (ctrl *controller) updateStatus(bkp *kahuapi.Backup, client kahuv1client.BackupInterface, status kahuapi.BackupStatus) {
 	backup, err := client.Get(context.Background(), bkp.Name, metav1.GetOptions{})
 	if err != nil {
-		c.logger.Errorf("failed to get backup for updating status :%+s", err)
+		ctrl.logger.Errorf("failed to get backup for updating status :%+s", err)
 		return
 	}
 
@@ -511,25 +492,10 @@ func (c *controller) updateStatus(bkp *kahuapi.Backup, client kahuv1client.Backu
 
 	_, err = client.UpdateStatus(context.Background(), backup, metav1.UpdateOptions{})
 	if err != nil {
-		c.logger.Errorf("failed to update backup status :%+s", err)
+		ctrl.logger.Errorf("failed to update backup status :%+s", err)
 	}
 
 	return
-}
-
-
-
-
-func (c *controller) handleAdd(obj interface{}) {
-	c.genericController.Enqueue(obj)
-}
-
-func (c *controller) handleUpdate(oldobj, obj interface{}) {
-	backup := obj.(*kahuapi.Backup)
-
-	if backup.DeletionTimestamp != nil {
-		c.deleteBackup(backup)
-	}
 }
 
 // addTypeInformationToObject adds TypeMeta information to a runtime.Object based upon the loaded scheme.Scheme

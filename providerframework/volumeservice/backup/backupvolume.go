@@ -20,6 +20,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
+
 	jsonpatch "github.com/evanphx/json-patch"
 	"github.com/pkg/errors"
 	log "github.com/sirupsen/logrus"
@@ -30,7 +32,6 @@ import (
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
-	"time"
 
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
 	"github.com/soda-cdm/kahu/client/clientset/versioned"
@@ -151,6 +152,7 @@ func (ctrl *controller) processDeleteVolumeBackup(backup *kahuapi.VolumeBackupCo
 		backupIdentifier := new(pb.BackupIdentifier)
 		backupIdentifier.BackupHandle = volumeState.BackupHandle
 		backupIdentifier.PvName = volumeState.VolumeName
+		backupIdentifiers = append(backupIdentifiers, backupIdentifier)
 	}
 
 	_, err := ctrl.providerClient.DeleteBackup(context.Background(), &pb.DeleteBackupRequest{

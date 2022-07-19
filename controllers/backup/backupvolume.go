@@ -60,7 +60,6 @@ func (ctrl *controller) processVolumeBackup(backup *kahuapi.Backup, ctx Context)
 
 func (ctrl *controller) removeVolumeBackup(
 	backup *kahuapi.Backup) error {
-
 	vbcList, err := ctrl.volumeBackupClient.List(context.TODO(), metav1.ListOptions{
 		LabelSelector: labels.Set{
 			volumeContentBackupLabel: backup.Name,
@@ -72,6 +71,9 @@ func (ctrl *controller) removeVolumeBackup(
 	}
 
 	for _, vbc := range vbcList.Items {
+		if vbc.DeletionTimestamp != nil { // ignore deleting volume backup content
+			continue
+		}
 		err := ctrl.volumeBackupClient.Delete(context.TODO(), vbc.Name, metav1.DeleteOptions{})
 		if err != nil {
 			ctrl.logger.Errorf("Failed to delete volume backup content %s", err)

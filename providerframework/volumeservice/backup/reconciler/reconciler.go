@@ -18,13 +18,13 @@ package reconciler
 
 import (
 	"context"
-	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"time"
 
 	log "github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
+	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	kahuclient "github.com/soda-cdm/kahu/client/clientset/versioned/typed/kahu/v1beta1"
 	kahulister "github.com/soda-cdm/kahu/client/listers/kahu/v1beta1"
