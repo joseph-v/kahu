@@ -89,8 +89,10 @@ func NewController(kahuClient versioned.Interface,
 		Informer().
 		AddEventHandler(
 			cache.ResourceEventHandlerFuncs{
-				AddFunc:    genericController.Enqueue,
-				DeleteFunc: genericController.Enqueue,
+				AddFunc: genericController.Enqueue,
+				UpdateFunc: func(oldObj, newObj interface{}) {
+					genericController.Enqueue(newObj)
+				},
 			},
 		)
 
@@ -103,7 +105,7 @@ func NewController(kahuClient versioned.Interface,
 	backupController.genericController = genericController
 
 	backupController.reconciler = reconciler.NewReconciler(
-		1*time.Second,
+		5*time.Second,
 		logger.WithField("source", "reconciler"),
 		backupController.volumeBackupClient,
 		backupController.volumeBackupLister,
@@ -164,12 +166,17 @@ func (ctrl *controller) processDeleteVolumeBackup(backup *kahuapi.VolumeBackupCo
 		return err
 	}
 
-	utils.RemoveFinalizer(backup, volumeBackupFinalizer)
-	_, err = ctrl.patchBackup(backup, backup)
+	ctrl.logger.Infof("Volume backup driver delete (%s) successfully", backup.Name)
+
+	backupClone := backup.DeepCopy()
+	utils.RemoveFinalizer(backupClone, volumeBackupFinalizer)
+	_, err = ctrl.patchBackup(backup, backupClone)
 	if err != nil {
 		ctrl.logger.Errorf("removing finalizer failed for %s", backup.Name)
+		return err
 	}
-	return err
+	ctrl.logger.Infof("Volume backup (%s) delete successfully", backup.Name)
+	return nil
 }
 
 func (ctrl *controller) processVolumeBackup(backup *kahuapi.VolumeBackupContent) error {
@@ -194,9 +201,9 @@ func (ctrl *controller) processVolumeBackup(backup *kahuapi.VolumeBackupContent)
 			return err
 		}
 
-		backupState := make([]kahuapi.VolumeState, 0)
+		backupState := make([]kahuapi.VolumeBackupState, 0)
 		for _, backupIdentifier := range response.GetBackupInfo() {
-			backupState = append(backupState, kahuapi.VolumeState{
+			backupState = append(backupState, kahuapi.VolumeBackupState{
 				VolumeName:   backupIdentifier.GetPvName(),
 				BackupHandle: backupIdentifier.GetBackupHandle(),
 			})
@@ -208,6 +215,11 @@ func (ctrl *controller) processVolumeBackup(backup *kahuapi.VolumeBackupContent)
 			BackupState:   backupState,
 			FailureReason: "",
 		})
+		if err != nil {
+			ctrl.logger.Errorf("Volume backup failed %s", backup.Name)
+			return err
+		}
+		ctrl.logger.Infof("Volume backup scheduled %s", backup.Name)
 	default:
 		logger.Infof("Ignoring volume backup state. The state gets handled by reconciler")
 	}
@@ -274,7 +286,7 @@ func (ctrl *controller) updateStatus(
 	backup *kahuapi.VolumeBackupContent,
 	status kahuapi.VolumeBackupContentStatus) (*kahuapi.VolumeBackupContent, error) {
 	ctrl.logger.Infof("Updating status: volume backup content %s", backup.Name)
-	if backup.Status.Phase != "" &&
+	if status.Phase != "" &&
 		status.Phase != backup.Status.Phase {
 		backup.Status.Phase = status.Phase
 	}

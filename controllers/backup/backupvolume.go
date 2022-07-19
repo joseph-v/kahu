@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	jsonpatch "github.com/evanphx/json-patch"
+	metaservice "github.com/soda-cdm/kahu/providerframework/metaservice/lib/go"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -34,12 +35,11 @@ import (
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
 )
 
-func getVBCName(backupName string) string {
-	return fmt.Sprintf("%s-%s", backupName, uuid.New().String())
+func getVBCName() string {
+	return fmt.Sprintf("vbc-%s", uuid.New().String())
 }
 
 func (ctrl *controller) processVolumeBackup(backup *kahuapi.Backup, ctx Context) error {
-	pvProviderMap := make(map[string][]corev1.PersistentVolume, 0)
 	ctrl.logger.Infof("Processing Volume backup(%s)", backup.Name)
 
 	pvs, err := ctrl.getVolumes(backup, ctx)
@@ -56,6 +56,7 @@ func (ctrl *controller) processVolumeBackup(backup *kahuapi.Backup, ctx Context)
 	}
 
 	// group pv with providers
+	pvProviderMap := make(map[string][]corev1.PersistentVolume, 0)
 	for _, pv := range pvs {
 		pvList, ok := pvProviderMap[pv.Spec.CSI.Driver]
 		if !ok {
@@ -182,7 +183,7 @@ func (ctrl *controller) ensureVolumeBackupContent(
 					volumeContentBackupLabel:    backupName,
 					volumeContentVolumeProvider: provider,
 				},
-				Name: getVBCName(backupName),
+				Name: getVBCName(),
 			},
 			Spec: kahuapi.VolumeBackupContentSpec{
 				BackupName:     backupName,
@@ -206,9 +207,54 @@ func (ctrl *controller) ensureVolumeBackupContent(
 	return nil
 }
 
+func (ctrl *controller) backupVolumeBackupContent(
+	backup *PrepareBackup,
+	backupClient metaservice.MetaService_BackupClient) error {
+	ctrl.logger.Infoln("Starting collecting volume backup content")
+
+	selectors := labels.Set(map[string]string{
+		volumeContentBackupLabel: backup.Name,
+	}).AsSelector()
+
+	list, err := ctrl.volumeBackupLister.List(selectors)
+	if err != nil {
+		return err
+	}
+	for _, volumeBackupContent := range list {
+		// ctrl.discoveryHelper.ByGroupVersionKind()
+		resourceData, err := json.Marshal(volumeBackupContent)
+		if err != nil {
+			ctrl.logger.Errorf("Unable to get resource content: %s", err)
+			return err
+		}
+
+		ctrl.logger.Infof("sending metadata for object %s/%s", volumeBackupContent.APIVersion,
+			volumeBackupContent.Name)
+
+		err = backupClient.Send(&metaservice.BackupRequest{
+			Backup: &metaservice.BackupRequest_BackupResource{
+				BackupResource: &metaservice.BackupResource{
+					Resource: &metaservice.Resource{
+						Name:    volumeBackupContent.Name,
+						Group:   volumeBackupContent.APIVersion,
+						Version: volumeBackupContent.APIVersion,
+						Kind:    volumeBackupContent.Kind,
+					},
+					Data: resourceData,
+				},
+			},
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (ctrl *controller) annotateBackup(
 	annotation string,
-	backup *kahuapi.Backup) (*kahuapi.Backup,error) {
+	backup *kahuapi.Backup) (*kahuapi.Backup, error) {
 	backupName := backup.Name
 	ctrl.logger.Infof("Annotating backup(%s) with %s", backupName, annotation)
 
@@ -246,4 +292,3 @@ func (ctrl *controller) annotateBackup(
 
 	return backup, nil
 }
-

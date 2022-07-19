@@ -60,10 +60,10 @@ type DiscoveryHelper interface {
 }
 
 type discoverHelper struct {
-	discoveryClient discovery.DiscoveryInterface
-	logger          log.FieldLogger
-	lock            sync.RWMutex
-	resources       []*metav1.APIResourceList
+	discoveryClient     discovery.DiscoveryInterface
+	logger              log.FieldLogger
+	lock                sync.RWMutex
+	resources           []*metav1.APIResourceList
 	k8sAPIGroups        []metav1.APIGroup
 	k8sVersion          *version.Info
 	apiIndexedResources cache.Indexer
@@ -146,24 +146,6 @@ func (helper *discoverHelper) ByGroupVersionKind(
 	input schema.GroupVersionKind) (schema.GroupVersionResource, metav1.APIResource, error) {
 	helper.lock.RLock()
 	defer helper.lock.RUnlock()
-
-	if obj, exist, err := helper.apiIndexedResources.GetByKey(input.String()); err != nil && exist {
-		resource, err := getAPIResource(obj)
-		if err != nil {
-			log.Warningf("invalid api resource %s", reflect.TypeOf(obj))
-			return schema.GroupVersionResource{}, metav1.APIResource{}, err
-		}
-		return schema.GroupVersionResource{
-			Group:    input.Group,
-			Version:  input.Version,
-			Resource: resource.Name,
-		}, *resource, nil
-	}
-
-	err := helper.Refresh()
-	if err != nil {
-		return schema.GroupVersionResource{}, metav1.APIResource{}, err
-	}
 
 	if obj, exist, err := helper.apiIndexedResources.GetByKey(input.String()); err != nil && exist {
 		resource, err := getAPIResource(obj)

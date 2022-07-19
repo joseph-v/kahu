@@ -132,10 +132,11 @@ func (ctrl *controller) runBackup(backup *PrepareBackup) error {
 	defer grpcConn.Close()
 
 	backupClient, err := metaServiceClient.Backup(context.Background())
-	if err!= nil {
+	if err != nil {
 		ctrl.logger.Errorf("Unable to get backup client. %s", err)
 		return errors.Wrap(err, fmt.Sprint("Unable to get backup client"))
 	}
+	defer backupClient.CloseAndRecv()
 
 	err = backupClient.Send(&metaservice.BackupRequest{
 		Backup: &metaservice.BackupRequest_Identifier{
@@ -250,8 +251,15 @@ func (ctrl *controller) runBackup(backup *PrepareBackup) error {
 		}
 	}
 
+	// add volume backup content in backup
+	err = ctrl.backupVolumeBackupContent(backup, backupClient)
+	if err != nil {
+		backup.Status.State = kahuapi.BackupStateFailed
+		ctrl.logger.Errorf("Failed to backup volume backup contents. %s", err)
+		return errors.Wrap(err, "unable to backup volume backup contents")
+	}
+
 	ctrl.logger.Infof("the intermediate status:%s", backupStatus)
-	_, err = backupClient.CloseAndRecv()
 
 	return err
 }

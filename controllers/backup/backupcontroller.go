@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"regexp"
 	"strings"
 
@@ -141,6 +142,10 @@ func (ctrl *controller) processQueue(key string) error {
 	ctrl.logger.Infof("Processing backup(%s) request", name)
 	backup, err := ctrl.backupLister.Get(name)
 	if err != nil {
+		if apierrors.IsNotFound(err) {
+			ctrl.logger.Infof("Backup %s already deleted", name)
+			return nil
+		}
 		// re enqueue for processing
 		return errors.Wrap(err, fmt.Sprintf("error getting backup %s from lister", name))
 	}
@@ -174,7 +179,7 @@ func (ctrl *controller) deleteBackup(backup *kahuapi.Backup) error {
 
 	// check if all volume backup contents are deleted
 	vbsList, err := ctrl.volumeBackupLister.List(
-		labels.Set{ volumeContentBackupLabel: backup.Name}.AsSelector())
+		labels.Set{volumeContentBackupLabel: backup.Name}.AsSelector())
 	if err != nil {
 		ctrl.logger.Errorf("Unable to get volume backup list. %s", err)
 		return err
@@ -183,6 +188,8 @@ func (ctrl *controller) deleteBackup(backup *kahuapi.Backup) error {
 		ctrl.logger.Errorf("Volume backup list is not empty. Continue to wait for Volume backup delete")
 		return nil
 	}
+
+	ctrl.logger.Info("Volume backup deleted successfully")
 
 	err = ctrl.deleteMetadataBackup(backup)
 	if err != nil {
@@ -226,6 +233,7 @@ func (ctrl *controller) syncVolumeBackup(
 			return err
 		}
 
+		// add volume backup content in resource backup list
 		return ctrl.syncResourceBackup(backup)
 	}
 
@@ -268,7 +276,7 @@ func (ctrl *controller) syncVolumeBackup(
 func (ctrl *controller) syncResourceBackup(
 	backup *kahuapi.Backup) (err error) {
 	if backup.Status.Stage == kahuapi.BackupStageFinished &&
-		backup.Status.State == kahuapi.BackupStateCompleted{
+		backup.Status.State == kahuapi.BackupStateCompleted {
 		ctrl.logger.Infof("Backup is finished already")
 		return err
 	}

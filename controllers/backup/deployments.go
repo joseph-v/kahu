@@ -55,8 +55,8 @@ func (ctrl *controller) deploymentBackup(namespace string,
 	selectors := labels.Set(labelSelectors).String()
 	dList, err := ctrl.kubeClient.AppsV1().Deployments(namespace).
 		List(context.TODO(), metav1.ListOptions{
-		LabelSelector: selectors,
-	})
+			LabelSelector: selectors,
+		})
 	if err != nil {
 		return err
 	}

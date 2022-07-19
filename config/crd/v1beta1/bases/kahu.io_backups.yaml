@@ -63,12 +63,6 @@ spec:
                 items:
                   type: string
                 type: array
-              excludeProviders:
-                description: ExcludeProviders is a list of all providers excluded
-                  for backup
-                items:
-                  type: string
-                type: array
               excludeResources:
                 description: ExcludeResources is a list of all resources excluded
                   for backup
@@ -277,12 +271,6 @@ spec:
                 items:
                   type: string
                 type: array
-              includeProviders:
-                description: IncludeProviders is a list of all provideres included
-                  for backup. If empty, all provideres are included
-                items:
-                  type: string
-                type: array
               includeResources:
                 description: IncludeResources is a list of all resources included
                   for backup. If empty, all resources are included
@@ -355,6 +343,12 @@ spec:
                   reclaimPolicyRetain:
                     type: string
                 type: object
+              volumeBackupLocations:
+                description: IncludeProviders is a list of all provideres included
+                  for backup. If empty, all provideres are included
+                items:
+                  type: string
+                type: array
             required:
             - metadataLocation
             type: object

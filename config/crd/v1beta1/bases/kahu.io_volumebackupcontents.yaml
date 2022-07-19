@@ -12,10 +12,16 @@ spec:
     kind: VolumeBackupContent
     listKind: VolumeBackupContentList
     plural: volumebackupcontents
+    shortNames:
+    - vbc
     singular: volumebackupcontent
   scope: Cluster
   versions:
-  - name: v1beta1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.backupName
+      name: Backup
+      type: string
+    name: v1beta1
     schema:
       openAPIV3Schema:
         description: VolumeBackupContent is the Schema for the VolumeBackupContents
@@ -40,7 +46,7 @@ spec:
                 description: BackupName is backup CR name specified during backup
                 type: string
               backupProviderLocation:
-                description: Backup provider customize information
+                description: Supported volume backup provider information
                 type: string
               volumeProvider:
                 description: Volume provider for set of volumes
@@ -1162,10 +1168,7 @@ spec:
                   properties:
                     backupHandle:
                       type: string
-                    bytesDone:
-                      format: int64
-                      type: integer
-                    totalBytes:
+                    progress:
                       format: int64
                       type: integer
                     volumeName:

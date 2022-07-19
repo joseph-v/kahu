@@ -19,7 +19,9 @@ package server
 import (
 	"context"
 
+	"github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
+
 	pb "github.com/soda-cdm/kahu/providers/lib/go"
 )
 
@@ -44,7 +46,16 @@ func NewVolumeBackupService(ctx context.Context) *service {
 // StartBackup create backup of the provided volumes
 func (svc *service) StartBackup(ctx context.Context, req *pb.StartBackupRequest) (*pb.StartBackupResponse, error) {
 	log.Infof("Start Backup called with Request %+v", req)
-	return &pb.StartBackupResponse{}, nil
+	identifiers := make([]*pb.BackupIdentifier, 0)
+	for _, pv := range req.Pv {
+		identifiers = append(identifiers, &pb.BackupIdentifier{
+			PvName:       pv.Name,
+			BackupHandle: uuid.New().String(),
+		})
+	}
+	return &pb.StartBackupResponse{
+		BackupInfo: identifiers,
+	}, nil
 }
 
 // DeleteBackup delete given backup
@@ -61,7 +72,16 @@ func (svc *service) CancelBackup(context.Context, *pb.CancelBackupRequest) (*pb.
 // GetBackupStat get backup statistics
 func (svc *service) GetBackupStat(_ context.Context, req *pb.GetBackupStatRequest) (*pb.GetBackupStatResponse, error) {
 	log.Infof("GetBackupStat called with Request %+v", req)
-	return &pb.GetBackupStatResponse{}, nil
+	backupStat := make([]*pb.BackupStat, 0)
+	for _, handle := range req.BackupHandle {
+		backupStat = append(backupStat, &pb.BackupStat{
+			BackupHandle: handle,
+			Progress:     100,
+		})
+	}
+	return &pb.GetBackupStatResponse{
+		BackupStats: backupStat,
+	}, nil
 }
 
 // Create volume from backup (for restore)

@@ -69,14 +69,10 @@ type BackupSpec struct {
 	// +optional
 	Hook HookSpec `json:"hook,omitempty"`
 
-	// IncludeProviders is a list of all provideres included for backup. If empty, all provideres
-	// are included
+	// VolumeBackupLocations is a list of all volume providers included for backup.
+	// If empty, all providers are included
 	// +optional
-	IncludeProviders []string `json:"includeProviders,omitempty"`
-
-	// ExcludeProviders is a list of all providers excluded for backup
-	// +optional
-	ExcludeProviders []string `json:"excludeProviders,omitempty"`
+	VolumeBackupLocations []string `json:"volumeBackupLocations,omitempty"`
 
 	// EnableMetadataBackup tells whether metadata backup should be taken or not
 	// +optional
@@ -181,7 +177,6 @@ type ExecHook struct {
 	// +optional
 	Timeout metav1.Duration `json:"timeout,omitempty"`
 }
-
 
 // HookErrorMode defines how service should treat an error from a hook.
 // +kubebuilder:validation:Enum=Continue;Fail

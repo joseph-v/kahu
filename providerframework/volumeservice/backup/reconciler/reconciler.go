@@ -50,7 +50,7 @@ func NewReconciler(
 		logger:             logger,
 		volumeBackupClient: volumeBackupClient,
 		volumeBackupLister: volumeBackupLister,
-		driverClient:     driverClient,
+		driverClient:       driverClient,
 	}
 }
 
@@ -59,7 +59,7 @@ type reconciler struct {
 	logger             log.FieldLogger
 	volumeBackupClient kahuclient.VolumeBackupContentInterface
 	volumeBackupLister kahulister.VolumeBackupContentLister
-	driverClient     pb.VolumeBackupClient
+	driverClient       pb.VolumeBackupClient
 }
 
 func (rc *reconciler) Run(stopCh <-chan struct{}) {
@@ -88,6 +88,8 @@ func (rc *reconciler) reconcile() {
 			rc.logger.Debugf("Volume backup % is completed. Skipping %s reconciliation",
 				volumeBackup.Name)
 			continue
+		} else if volumeBackup.Status.Phase != kahuapi.VolumeBackupContentPhaseInProgress {
+			continue
 		}
 
 		backupCurrentState := volumeBackup.Status.BackupState
@@ -104,7 +106,7 @@ func (rc *reconciler) reconcile() {
 			rc.logger.Errorf("Unable to get volume backup state for %s. %s", volumeBackup.Name, err)
 			continue
 		}
-		updatedBackupState := make([]kahuapi.VolumeState, 0)
+		updatedBackupState := make([]kahuapi.VolumeBackupState, 0)
 		// map all stat
 		statMap := make(map[string]*pb.BackupStat)
 		for _, backupStat := range stat.GetBackupStats() {
@@ -127,14 +129,13 @@ func (rc *reconciler) reconcile() {
 				continue
 			}
 			statCount += 1
-			if stat.TotalBytes > stat.BytesDone {
+			if stat.Progress < 100 {
 				statUpdatecompleted = false
 			}
-			updatedBackupState = append(updatedBackupState, kahuapi.VolumeState{
+			updatedBackupState = append(updatedBackupState, kahuapi.VolumeBackupState{
 				VolumeName:   volName,
 				BackupHandle: backupState.BackupHandle,
-				TotalBytes:   stat.TotalBytes,
-				BytesDone:    stat.BytesDone,
+				Progress:     backupState.Progress,
 			})
 		}
 
@@ -156,11 +157,7 @@ func (rc *reconciler) reconcile() {
 func (rc *reconciler) updateVolumeBackupStatus(backup *kahuapi.VolumeBackupContent,
 	status kahuapi.VolumeBackupContentStatus) (*kahuapi.VolumeBackupContent, error) {
 	rc.logger.Infof("Updating status: volume backup content %s", backup.Name)
-	currentCopy, err := rc.volumeBackupLister.Get(backup.Name)
-	if err != nil {
-		rc.logger.Errorf("Unable to update status. %s", err)
-		return nil, err
-	}
+	currentCopy := backup.DeepCopy()
 
 	if currentCopy.Status.Phase != "" &&
 		status.Phase != currentCopy.Status.Phase {
@@ -171,8 +168,8 @@ func (rc *reconciler) updateVolumeBackupStatus(backup *kahuapi.VolumeBackupConte
 		currentCopy.Status.FailureReason = status.FailureReason
 	}
 
-	if currentCopy.Status.StartTimestamp == nil &&
-		status.StartTimestamp != nil {
+	if currentCopy.Status.StartTimestamp.IsZero() &&
+		!status.StartTimestamp.IsZero() {
 		currentCopy.Status.StartTimestamp = status.StartTimestamp
 	}
 
@@ -180,6 +177,7 @@ func (rc *reconciler) updateVolumeBackupStatus(backup *kahuapi.VolumeBackupConte
 		currentCopy.Status.BackupState = status.BackupState
 	}
 
+	//rc.logger.Infof("status update %+v", currentCopy)
 	return rc.volumeBackupClient.UpdateStatus(context.TODO(),
 		currentCopy,
 		metav1.UpdateOptions{})
