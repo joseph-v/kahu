@@ -197,7 +197,7 @@ func (rc *reconciler) annotateBackup(
 
 	_, ok := backup.Annotations[annotation]
 	if ok {
-		rc.logger.Infof("Backup(%s) all-ready annotated with %s", annotation)
+		rc.logger.Infof("Backup(%s) all-ready annotated with %s", backupName, annotation)
 		return nil
 	}
 

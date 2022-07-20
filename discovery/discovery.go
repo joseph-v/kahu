@@ -17,7 +17,6 @@ limitations under the License.
 package discovery
 
 import (
-	"fmt"
 	"k8s.io/client-go/tools/cache"
 	"reflect"
 	"sync"
@@ -35,7 +34,7 @@ const (
 	clusterScopeIndex   = "api-resource-cluster-scope-index"
 )
 
-// DiscoveryHelper exposes functions for Kubernetes discovery API.
+// DiscoveryHelper exposes functions for Kubernetes API discovery.
 type DiscoveryHelper interface {
 	// APIGroups returns current supported APIGroups in kubernetes cluster
 	APIGroups() []metav1.APIGroup
@@ -65,7 +64,6 @@ type discoverHelper struct {
 	logger          log.FieldLogger
 	lock            sync.RWMutex
 	resources       []*metav1.APIResourceList
-	//byGroupVersionKind map[schema.GroupVersionKind]metav1.APIResource
 	k8sAPIGroups        []metav1.APIGroup
 	k8sVersion          *version.Info
 	apiIndexedResources cache.Indexer
@@ -99,7 +97,7 @@ func getAPIResource(obj interface{}) (*metav1.APIResource, error) {
 }
 
 func gvkKey(gvk schema.GroupVersionKind) string {
-	return fmt.Sprintf("%s.%s/%s", gvk.Kind, gvk.Group, gvk.Version)
+	return gvk.String()
 }
 
 func gvkKeyFunc(obj interface{}) (string, error) {
@@ -145,8 +143,7 @@ func newApiResourcesIndexers() cache.Indexers {
 }
 
 func (helper *discoverHelper) ByGroupVersionKind(
-	input schema.GroupVersionKind) (schema.GroupVersionResource,
-	metav1.APIResource, error) {
+	input schema.GroupVersionKind) (schema.GroupVersionResource, metav1.APIResource, error) {
 	helper.lock.RLock()
 	defer helper.lock.RUnlock()
 
@@ -205,7 +202,6 @@ func (helper *discoverHelper) Refresh() error {
 		apiResourcesList,
 	)
 
-	//helper.byGroupVersionKind = make(map[schema.GroupVersionKind]metav1.APIResource)
 	helper.apiIndexedResources = cache.NewIndexer(gvkKeyFunc, newApiResourcesIndexers())
 	for _, resourceGroup := range helper.resources {
 		gv, err := schema.ParseGroupVersion(resourceGroup.GroupVersion)
@@ -217,7 +213,6 @@ func (helper *discoverHelper) Refresh() error {
 			gvk := gv.WithKind(resource.Kind)
 			resource.Group = gvk.Group
 			resource.Version = gvk.Version
-			// helper.byGroupVersionKind[gvk] = resource
 
 			err := helper.apiIndexedResources.Add(resource.DeepCopy())
 			if err != nil {

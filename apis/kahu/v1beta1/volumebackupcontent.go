@@ -35,7 +35,7 @@ type VolumeBackupContentSpec struct {
 	// Volume provider for set of volumes
 	VolumeProvider *string `json:"volumeProvider,omitempty"`
 
-	// Backup provider customize information
+	// Supported volume backup provider information
 	// +required
 	BackupProviderLocation string `json:"backupProviderLocation"`
 }
@@ -52,14 +52,12 @@ const (
 	VolumeBackupContentPhaseDeleting   VolumeBackupContentPhase = "Deleting"
 )
 
-type VolumeState struct {
+type VolumeBackupState struct {
 	VolumeName string `json:"volumeName,omitempty"`
 
 	BackupHandle string `json:"backupHandle,omitempty"`
 
-	TotalBytes int64 `json:"totalBytes,omitempty"`
-
-	BytesDone int64 `json:"bytesDone,omitempty"`
+	Progress int64 `json:"progress,omitempty"`
 }
 
 // VolumeBackupContentStatus defines the observed state of VolumeBackupContent
@@ -82,7 +80,7 @@ type VolumeBackupContentStatus struct {
 	FailureReason string `json:"failureReason,omitempty"`
 
 	// +optional
-	BackupState []VolumeState `json:"backupState,omitempty"`
+	BackupState []VolumeBackupState `json:"backupState,omitempty"`
 }
 
 // +genclient

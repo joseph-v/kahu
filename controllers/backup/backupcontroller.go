@@ -260,13 +260,18 @@ func (ctrl *controller) syncVolumeBackup(
 	// populate all meta service
 	backup, err = ctrl.updateBackupStatusWithEvent(backup, kahuapi.BackupStatus{
 		State: kahuapi.BackupStateProcessing,
-	}, v1.EventTypeNormal, string(kahuapi.BackupStageVolumes),
+	}, v1.EventTypeNormal, "VolumeBackupScheduled",
 		"Volume backup Scheduled")
 	return err
 }
 
 func (ctrl *controller) syncResourceBackup(
 	backup *kahuapi.Backup) (err error) {
+	if backup.Status.Stage == kahuapi.BackupStageFinished &&
+		backup.Status.State == kahuapi.BackupStateCompleted{
+		ctrl.logger.Infof("Backup is finished already")
+		return err
+	}
 
 	err = ctrl.processMetadataBackup(backup)
 	if err != nil {
@@ -277,9 +282,6 @@ func (ctrl *controller) syncResourceBackup(
 		Stage: kahuapi.BackupStageFinished,
 	}, v1.EventTypeNormal, string(kahuapi.BackupStageResources),
 		"Metdata backup success")
-	if err != nil {
-		return err
-	}
 
 	return err
 }

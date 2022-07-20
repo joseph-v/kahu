@@ -41,7 +41,6 @@ func (ctrl *controller) processMetadataBackup(backup *kahuapi.Backup) error {
 	if err != nil {
 		ctrl.logger.Errorf("failed to validate backup location, reason: %s", err)
 		backup.Status.State = kahuapi.BackupStateFailed
-		backup.Status.Stage = kahuapi.BackupStageInitial
 		backup.Status.ValidationErrors = append(backup.Status.ValidationErrors, fmt.Sprintf("%v", err))
 		ctrl.updateStatus(backup, ctrl.backupClient, backup.Status)
 		return err

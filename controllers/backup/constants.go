@@ -41,11 +41,7 @@ const (
 type Phase int
 
 const (
-	BackupPhaseInvalid Phase = iota - 1
-	BackupPhaseInit
-	BackupPhaseVolume
-	BackupPhaseMetadata
-	BackupPhaseCompleted
+	BackupPhaseInvalid Phase = -1
 )
 
 var backupPhases = [...]kahuapi.BackupStage{
@@ -53,7 +49,8 @@ var backupPhases = [...]kahuapi.BackupStage{
 	kahuapi.BackupStagePreHook,
 	kahuapi.BackupStageVolumes,
 	kahuapi.BackupStagePostHook,
-	kahuapi.BackupStageResources}
+	kahuapi.BackupStageResources,
+	kahuapi.BackupStageFinished}
 
 func toIota(p kahuapi.BackupStage) Phase {
 	phase := BackupPhaseInvalid

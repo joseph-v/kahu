@@ -21,10 +21,10 @@ import (
 	"time"
 
 	log "github.com/sirupsen/logrus"
-	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/util/wait"
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/wait"
 
 	kahuclient "github.com/soda-cdm/kahu/client/clientset/versioned/typed/kahu/v1beta1"
 	kahulister "github.com/soda-cdm/kahu/client/listers/kahu/v1beta1"
@@ -44,13 +44,13 @@ func NewReconciler(
 	logger log.FieldLogger,
 	volumeBackupClient kahuclient.VolumeBackupContentInterface,
 	volumeBackupLister kahulister.VolumeBackupContentLister,
-	providerClient pb.VolumeBackupClient) Reconciler {
+	driverClient pb.VolumeBackupClient) Reconciler {
 	return &reconciler{
 		loopPeriod:         loopPeriod,
 		logger:             logger,
 		volumeBackupClient: volumeBackupClient,
 		volumeBackupLister: volumeBackupLister,
-		providerClient:     providerClient,
+		driverClient:     driverClient,
 	}
 }
 
@@ -59,7 +59,7 @@ type reconciler struct {
 	logger             log.FieldLogger
 	volumeBackupClient kahuclient.VolumeBackupContentInterface
 	volumeBackupLister kahulister.VolumeBackupContentLister
-	providerClient     pb.VolumeBackupClient
+	driverClient     pb.VolumeBackupClient
 }
 
 func (rc *reconciler) Run(stopCh <-chan struct{}) {
@@ -97,7 +97,7 @@ func (rc *reconciler) reconcile() {
 			backupHandles = append(backupHandles, state.BackupHandle)
 			backupHandleMap[state.BackupHandle] = state.VolumeName
 		}
-		stat, err := rc.providerClient.GetBackupStat(context.TODO(), &pb.GetBackupStatRequest{
+		stat, err := rc.driverClient.GetBackupStat(context.TODO(), &pb.GetBackupStatRequest{
 			BackupHandle: backupHandles,
 		})
 		if err != nil {

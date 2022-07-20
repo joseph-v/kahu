@@ -18,8 +18,11 @@ package backup
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	jsonpatch "github.com/evanphx/json-patch"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/google/uuid"
@@ -41,6 +44,14 @@ func (ctrl *controller) processVolumeBackup(backup *kahuapi.Backup, ctx Context)
 
 	pvs, err := ctrl.getVolumes(backup, ctx)
 	if err != nil {
+		return err
+	}
+
+	if len(pvs) == 0 {
+		ctrl.logger.Infof("No volume for backup. " +
+			"Setting stage to volume backup completed")
+		// set annotation for
+		_, err = ctrl.annotateBackup(annVolumeBackupCompleted, backup)
 		return err
 	}
 
@@ -194,3 +205,45 @@ func (ctrl *controller) ensureVolumeBackupContent(
 
 	return nil
 }
+
+func (ctrl *controller) annotateBackup(
+	annotation string,
+	backup *kahuapi.Backup) (*kahuapi.Backup,error) {
+	backupName := backup.Name
+	ctrl.logger.Infof("Annotating backup(%s) with %s", backupName, annotation)
+
+	_, ok := backup.Annotations[annotation]
+	if ok {
+		ctrl.logger.Infof("Backup(%s) all-ready annotated with %s", backupName, annotation)
+		return backup, nil
+	}
+
+	backupClone := backup.DeepCopy()
+	metav1.SetMetaDataAnnotation(&backupClone.ObjectMeta, annotation, "true")
+
+	origBytes, err := json.Marshal(backup)
+	if err != nil {
+		return backup, errors.Wrap(err, "error marshalling backup")
+	}
+
+	updatedBytes, err := json.Marshal(backupClone)
+	if err != nil {
+		return backup, errors.Wrap(err, "error marshalling updated backup")
+	}
+
+	patchBytes, err := jsonpatch.CreateMergePatch(origBytes, updatedBytes)
+	if err != nil {
+		return backup, errors.Wrap(err, "error creating json merge patch for backup")
+	}
+
+	backup, err = ctrl.backupClient.Patch(context.TODO(), backupName,
+		types.MergePatchType, patchBytes, metav1.PatchOptions{})
+	if err != nil {
+		ctrl.logger.Error("Unable to update backup(%s) for volume completeness. %s",
+			backupName, err)
+		errors.Wrap(err, "error annotating volume backup completeness")
+	}
+
+	return backup, nil
+}
+
