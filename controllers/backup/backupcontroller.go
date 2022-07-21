@@ -48,6 +48,7 @@ import (
 	kahulister "github.com/soda-cdm/kahu/client/listers/kahu/v1beta1"
 	"github.com/soda-cdm/kahu/controllers"
 	"github.com/soda-cdm/kahu/discovery"
+	"github.com/soda-cdm/kahu/hooks"
 	"github.com/soda-cdm/kahu/utils"
 )
 
@@ -65,6 +66,7 @@ type controller struct {
 	providerLister       kahulister.ProviderLister
 	volumeBackupClient   kahuv1client.VolumeBackupContentInterface
 	volumeBackupLister   kahulister.VolumeBackupContentLister
+	hookExecutor         hooks.Hooks
 }
 
 func NewController(
@@ -74,7 +76,8 @@ func NewController(
 	dynamicClient dynamic.Interface,
 	informer kahuinformer.SharedInformerFactory,
 	eventBroadcaster record.EventBroadcaster,
-	discoveryHelper discovery.DiscoveryHelper) (controllers.Controller, error) {
+	discoveryHelper discovery.DiscoveryHelper,
+	hookExecutor hooks.Hooks) (controllers.Controller, error) {
 
 	logger := log.WithField("controller", controllerName)
 	backupController := &controller{
@@ -89,6 +92,7 @@ func NewController(
 		providerLister:       informer.Kahu().V1beta1().Providers().Lister(),
 		volumeBackupClient:   kahuClient.KahuV1beta1().VolumeBackupContents(),
 		volumeBackupLister:   informer.Kahu().V1beta1().VolumeBackupContents().Lister(),
+		hookExecutor:         hookExecutor,
 	}
 
 	// construct controller interface to process worker queue
@@ -261,6 +265,12 @@ func (ctrl *controller) syncVolumeBackup(
 		return err
 	}
 
+	// Execute pre hooks
+	err = ctrl.hookExecutor.ExecuteHook(backup, hooks.PreHookPhase)
+	if err != nil {
+		ctrl.logger.Infof("failed to Execute pre hooks %s", err)
+	}
+
 	err = ctrl.processVolumeBackup(backup, backupContext)
 	if err != nil {
 		return err
@@ -270,6 +280,16 @@ func (ctrl *controller) syncVolumeBackup(
 		State: kahuapi.BackupStateProcessing,
 	}, v1.EventTypeNormal, "VolumeBackupScheduled",
 		"Volume backup Scheduled")
+	if err != nil {
+		return err
+	}
+
+	// Execute post hooks
+	err = ctrl.hookExecutor.ExecuteHook(backup, hooks.PostHookPhase)
+	if err != nil {
+		ctrl.logger.Infof("failed to Execute pre hooks :%s", err)
+	}
+
 	return err
 }
 
