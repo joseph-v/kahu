@@ -1,0 +1,8 @@
+apiVersion: kahu.io/v1
+kind: Restore 
+metadata:
+   name: restore-kahu-001
+spec:
+    backupName: backup-kahu-001
+    namespaceMapping:
+      default: sk001

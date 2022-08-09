@@ -1,13 +1,11 @@
 apiVersion: kahu.io/v1
 kind: Backup
 metadata:
-  name: backup-demo-123a
+  name: backup-kahu-001
 spec:
-  # includeResources:
-  excludeResources: []
   includeNamespaces: [default]
   metadataLocation: nfs
   includeResources:
-    - name: busybox
-      kind: Pod
-      isRegex: true
+      - name: busybox
+        kind: Pod
+        isRegex: true

@@ -1,9 +1,45 @@
 apiVersion: kahu.io/v1
 kind: Restore 
 metadata:
-   name: restore-demo-4
+   name: restore-kahu-003
 spec:
-   backupName: backup-demo-12
-   namespaceMapping:
-     default: sk
-
+    backupName: backup-kahu-001
+    namespaceMapping:
+      default: sk003
+    hook:
+      resources:
+      - name: kahu_hook1
+      #   labelSelector:
+      #     matchLabels:
+      #       app: busybox
+        includeNamespaces: [sk003]
+        excludeNamespaces: [test]
+        includeResources:
+        - name: busybox
+          kind: Pod
+          isRegex: true
+        post:
+          - exec:
+              container: busybox
+              command: 
+                    - /bin/sh
+                    - -c
+                    - ls -l && hostname
+              timeout: 5m
+              onError: Continue
+          - init:
+                initContainers:
+                    - name: restore-hook-init1
+                      image: busybox
+                      # volumeMounts:
+                      #   - mountPath: /restores
+                      #     name: nfs
+                      # command:
+                      #   - /bin/sh
+                      #   - -c
+                      #   - echo -n "FOOBARBAZ" >> /restores/foobarbaz
+                      # container: busybox
+                      command:
+                          - /bin/sh
+                          - -c
+                          - ls -l && hostname && date
