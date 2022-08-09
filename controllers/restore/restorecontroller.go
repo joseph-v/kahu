@@ -20,13 +20,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"sync"
+
 	"github.com/pkg/errors"
 	metaservice "github.com/soda-cdm/kahu/providerframework/metaservice/lib/go"
 	"github.com/soda-cdm/kahu/utils"
 	"google.golang.org/grpc"
-	"io"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-	"regexp"
+
+	// "regexp"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -47,6 +50,7 @@ import (
 	kahulister "github.com/soda-cdm/kahu/client/listers/kahu/v1"
 	"github.com/soda-cdm/kahu/controllers"
 	"github.com/soda-cdm/kahu/discovery"
+	"github.com/soda-cdm/kahu/hooks"
 )
 
 type controller struct {
@@ -60,13 +64,17 @@ type controller struct {
 	backupLister         kahulister.BackupLister
 	backupLocationLister kahulister.BackupLocationLister
 	providerLister       kahulister.ProviderLister
+	podCommandExecutor   hooks.PodCommandExecutor
+	podGetter            cache.Getter
 }
 
 func NewController(kubeClient kubernetes.Interface,
 	kahuClient versioned.Interface,
 	dynamicClient dynamic.Interface,
 	discoveryHelper discovery.DiscoveryHelper,
-	informer externalversions.SharedInformerFactory) (controllers.Controller, error) {
+	informer externalversions.SharedInformerFactory,
+	podCommandExecutor hooks.PodCommandExecutor,
+	podGetter cache.Getter) (controllers.Controller, error) {
 
 	logger := log.WithField("controller", controllerName)
 	restoreController := &controller{
@@ -79,6 +87,8 @@ func NewController(kubeClient kubernetes.Interface,
 		backupLister:         informer.Kahu().V1().Backups().Lister(),
 		backupLocationLister: informer.Kahu().V1().BackupLocations().Lister(),
 		providerLister:       informer.Kahu().V1().Providers().Lister(),
+		podCommandExecutor:   podCommandExecutor,
+		podGetter:            podGetter,
 	}
 
 	// construct controller interface to process worker queue
@@ -118,11 +128,23 @@ type restoreContext struct {
 	backupObjectIndexer  cache.Indexer
 	filter               filterHandler
 	mutator              mutationHandler
+	hooksWaitGroup       sync.WaitGroup
+	hooksErrs            chan error
+	waitExecHookHandler  hooks.WaitExecHookHandler
+	hooksContext         context.Context
+	hooksCancelFunc      context.CancelFunc
 }
 
 func newRestoreContext(name string, ctrl *controller) *restoreContext {
 	backupObjectIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, newBackupObjectIndexers())
 	logger := ctrl.logger.WithField("restore", name)
+	hooksCtx, hooksCancelFunc := context.WithCancel(context.Background())
+	waitExecHookHandler := &hooks.DefaultWaitExecHookHandler{
+		PodCommandExecutor: ctrl.podCommandExecutor,
+		ListWatchFactory: &hooks.DefaultListWatchFactory{
+			PodsGetter: ctrl.podGetter,
+		},
+	}
 	return &restoreContext{
 		logger:               logger,
 		kubeClient:           ctrl.kubeClient,
@@ -136,6 +158,10 @@ func newRestoreContext(name string, ctrl *controller) *restoreContext {
 		backupObjectIndexer:  backupObjectIndexer,
 		filter:               constructFilterHandler(backupObjectIndexer, logger),
 		mutator:              constructMutationHandler(backupObjectIndexer, logger),
+		hooksErrs:            make(chan error),
+		waitExecHookHandler:  waitExecHookHandler,
+		hooksContext:         hooksCtx,
+		hooksCancelFunc:      hooksCancelFunc,
 	}
 }
 
@@ -180,6 +206,7 @@ func newBackupObjectIndexers() cache.Indexers {
 
 func (ctrl *controller) processQueue(index string) error {
 	// get restore name
+	ctrl.logger.Infof("--------------- In process Queue with index %s --------------", index)
 	_, name, err := cache.SplitMetaNamespaceKey(index)
 	if err != nil {
 		ctrl.logger.Errorf("splitting key into namespace and name, error %s", err)
@@ -269,12 +296,14 @@ func (ctx *restoreContext) syncRestore(restore *kahuapi.Restore) error {
 	}
 
 	// fetch backup info
+	ctx.logger.Infof("Processing fetchBackupInfo for %s", restore.Name)
 	backupInfo, err := ctx.fetchBackupInfo(restore)
 	if err != nil {
 		return err
 	}
 
 	// construct backup identifier
+	ctx.logger.Infof("Processing GetBackupIdentifier for %s", restore.Name)
 	backupIdentifier, err := utils.GetBackupIdentifier(backupInfo.backup,
 		backupInfo.backupLocation,
 		backupInfo.backupProvider)
@@ -283,6 +312,7 @@ func (ctx *restoreContext) syncRestore(restore *kahuapi.Restore) error {
 	}
 
 	// fetch backup content and cache them
+	ctx.logger.Infof("Processing fetchBackupContent for %s", restore.Name)
 	err = ctx.fetchBackupContent(backupInfo.backupProvider, backupIdentifier, restore)
 	if err != nil {
 		restore.Status.State = kahuapi.RestoreStateFailed
@@ -293,6 +323,7 @@ func (ctx *restoreContext) syncRestore(restore *kahuapi.Restore) error {
 	}
 
 	// filter resources from cache
+	ctx.logger.Infof("Processing filter.handle for %s", restore.Name)
 	err = ctx.filter.handle(restore)
 	if err != nil {
 		restore.Status.State = kahuapi.RestoreStateFailed
@@ -303,6 +334,7 @@ func (ctx *restoreContext) syncRestore(restore *kahuapi.Restore) error {
 	}
 
 	// add mutation
+	ctx.logger.Infof("Processing mutation for %s", restore.Name)
 	err = ctx.mutator.handle(restore)
 	if err != nil {
 		restore.Status.State = kahuapi.RestoreStateFailed
@@ -311,6 +343,7 @@ func (ctx *restoreContext) syncRestore(restore *kahuapi.Restore) error {
 		return err
 	}
 
+	ctx.logger.Infof("Processing syncMetadataRestore for %s", restore.Name)
 	return ctx.syncMetadataRestore(restore)
 }
 
@@ -328,22 +361,22 @@ func (ctx *restoreContext) validateRestore(restore *kahuapi.Restore) {
 
 	// resource validation
 	// check regular expression validity
-	for _, resourceSpec := range restore.Spec.IncludeResources {
-		if _, err := regexp.Compile(resourceSpec.Name); err != nil {
-			restore.Status.ValidationErrors =
-				append(restore.Status.ValidationErrors,
-					fmt.Sprintf("invalid include resource name specification name %s",
-						resourceSpec.Name))
-		}
-	}
-	for _, resourceSpec := range restore.Spec.ExcludeResources {
-		if _, err := regexp.Compile(resourceSpec.Name); err != nil {
-			restore.Status.ValidationErrors =
-				append(restore.Status.ValidationErrors,
-					fmt.Sprintf("invalid include resource name specification name %s",
-						resourceSpec.Name))
-		}
-	}
+	// for _, resourceSpec := range restore.Spec.IncludeResources {
+	// 	if _, err := regexp.Compile(resourceSpec.Name); err != nil {
+	// 		restore.Status.ValidationErrors =
+	// 			append(restore.Status.ValidationErrors,
+	// 				fmt.Sprintf("invalid include resource name specification name %s",
+	// 					resourceSpec.Name))
+	// 	}
+	// }
+	// for _, resourceSpec := range restore.Spec.ExcludeResources {
+	// 	if _, err := regexp.Compile(resourceSpec.Name); err != nil {
+	// 		restore.Status.ValidationErrors =
+	// 			append(restore.Status.ValidationErrors,
+	// 				fmt.Sprintf("invalid include resource name specification name %s",
+	// 					resourceSpec.Name))
+	// 	}
+	// }
 }
 
 func (ctx *restoreContext) updateRestoreStatus(restore *kahuapi.Restore) (*kahuapi.Restore, error) {

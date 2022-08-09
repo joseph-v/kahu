@@ -52,6 +52,7 @@ type CompletedConfig struct {
 	DiscoveryHelper  discovery.DiscoveryHelper
 	EventBroadcaster record.EventBroadcaster
 	HookExecutor     hooks.Hooks
+	PodCmdExecutor   hooks.PodCommandExecutor
 }
 
 func (cfg *Config) Complete() (*CompletedConfig, error) {
@@ -87,7 +88,10 @@ func (cfg *Config) Complete() (*CompletedConfig, error) {
 	if err != nil {
 		return nil, err
 	}
-	hookExecutor, err := hooks.NewHooks(kubeClient, restConfig)
+
+	podCommandExecutor := hooks.NewPodCommandExecutor(restConfig, kubeClient.CoreV1().RESTClient())
+
+	hookExecutor, err := hooks.NewHooks(kubeClient, restConfig, podCommandExecutor)
 	if err != nil {
 		log.Errorf("failed to create hook, error %s\n", err.Error())
 		return nil, err
@@ -102,6 +106,7 @@ func (cfg *Config) Complete() (*CompletedConfig, error) {
 		DiscoveryHelper:  discoveryHelper,
 		EventBroadcaster: eventBroadcaster,
 		HookExecutor:     hookExecutor,
+		PodCmdExecutor:   podCommandExecutor,
 		KahuInformer:     kahuinformer.NewSharedInformerFactoryWithOptions(kahuClient, 0),
 	}, nil
 }

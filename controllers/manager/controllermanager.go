@@ -50,7 +50,8 @@ type ControllerManager struct {
 	kubeClient               kubernetes.Interface
 	discoveryHelper          discovery.DiscoveryHelper
 	EventBroadcaster         record.EventBroadcaster
-	HookExecutor			 hooks.Hooks
+	HookExecutor             hooks.Hooks
+	PodCommandExecutor       hooks.PodCommandExecutor
 }
 
 func NewControllerManager(ctx context.Context,
@@ -84,6 +85,7 @@ func NewControllerManager(ctx context.Context,
 		discoveryHelper:          completeConfig.DiscoveryHelper,
 		EventBroadcaster:         completeConfig.EventBroadcaster,
 		HookExecutor:             completeConfig.HookExecutor,
+		PodCommandExecutor:       completeConfig.PodCmdExecutor,
 	}, nil
 }
 
@@ -111,7 +113,10 @@ func (mgr *ControllerManager) InitControllers() (map[string]controllers.Controll
 		mgr.kahuClient,
 		mgr.completeConfig.DynamicClient,
 		mgr.completeConfig.DiscoveryHelper,
-		mgr.informerFactory)
+		mgr.informerFactory,
+		mgr.PodCommandExecutor,
+		mgr.kubeClient.CoreV1().RESTClient(),
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize restore controller. %s", err)
 	}

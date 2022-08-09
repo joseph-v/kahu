@@ -47,13 +47,11 @@ type Factory interface {
 	ClientConfig() (*rest.Config, error)
 }
 
-
 type Config struct {
-	KubeConfig    string `json:"kubeConfig"`
-	ClientQPS     float32 `json:"clientQPS"`
-	ClientBurst   int `json:"clientBurst"`
+	KubeConfig  string  `json:"kubeConfig"`
+	ClientQPS   float32 `json:"clientQPS"`
+	ClientBurst int     `json:"clientBurst"`
 }
-
 
 type factory struct {
 	agentBaseName string
@@ -63,8 +61,8 @@ type factory struct {
 // NewFactoryConfig returns factory configuration.
 func NewFactoryConfig() *Config {
 	cfg := &Config{
-		ClientQPS:     defaultClientQPS,
-		ClientBurst:   defaultClientBurst,
+		ClientQPS:   defaultClientQPS,
+		ClientBurst: defaultClientBurst,
 	}
 
 	return cfg
@@ -74,7 +72,7 @@ func NewFactoryConfig() *Config {
 func NewFactory(agentBaseName string, cfg *Config) Factory {
 	f := &factory{
 		agentBaseName: agentBaseName,
-		Config: cfg,
+		Config:        cfg,
 	}
 
 	return f

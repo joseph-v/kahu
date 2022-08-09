@@ -169,7 +169,6 @@ type ExecHook struct {
 	Timeout metav1.Duration `json:"timeout,omitempty"`
 }
 
-
 // HookErrorMode defines how service should treat an error from a hook.
 // +kubebuilder:validation:Enum=Continue;Fail
 type HookErrorMode string

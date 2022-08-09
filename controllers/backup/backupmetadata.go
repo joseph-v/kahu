@@ -62,7 +62,12 @@ func (ctrl *controller) processMetadataBackup(backup *kahuapi.Backup) error {
 	prepareBackupReq.Status.StartTimestamp = &metav1.Time{Time: time.Now()}
 	ctrl.updateStatus(prepareBackupReq.Backup, ctrl.backupClient, prepareBackupReq.Status)
 
-	return ctrl.runBackup(prepareBackupReq)
+	err = ctrl.runBackup(prepareBackupReq)
+	if err != nil {
+		prepareBackupReq.Status.State = kahuapi.BackupStateFailed
+		ctrl.updateStatus(prepareBackupReq.Backup, ctrl.backupClient, prepareBackupReq.Status)
+	}
+	return err
 }
 
 func (ctrl *controller) prepareBackupRequest(backup *kahuapi.Backup) *PrepareBackup {
@@ -120,7 +125,7 @@ func (ctrl *controller) runBackup(backup *PrepareBackup) error {
 	defer grpcConn.Close()
 
 	backupClient, err := metaServiceClient.Backup(context.Background())
-	if err!= nil {
+	if err != nil {
 		ctrl.logger.Errorf("Unable to get backup client. %s", err)
 		return errors.Wrap(err, fmt.Sprint("Unable to get backup client"))
 	}
