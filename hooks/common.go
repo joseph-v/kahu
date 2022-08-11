@@ -19,13 +19,17 @@ limitations under the License.
 package hooks
 
 import (
+	"context"
 	"encoding/json"
 
 	"github.com/sirupsen/logrus"
+	log "github.com/sirupsen/logrus"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/kubernetes"
 
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1"
 	"github.com/soda-cdm/kahu/utils"
@@ -104,6 +108,16 @@ func validateHook(log logrus.FieldLogger,
 		return false
 	}
 	// Check resource
+	for _, res := range hookSpec.IncludeResources {
+		if res.Kind != PodResource {
+			log.Errorf("invalid hook resource (%s for %s) in resource spec include, skipping resource", res.Kind, name)
+		}
+	}
+	for _, res := range hookSpec.ExcludeResources {
+		if res.Kind != PodResource {
+			log.Errorf("invalid hook resource (%s for %s) in resource spec exclude, skipping resource", res.Kind, name)
+		}
+	}
 	resourcesIn := hookSpec.IncludeResources
 	resourcesEx := hookSpec.ExcludeResources
 
@@ -143,4 +157,158 @@ func parseStringToCommand(commandValue string) []string {
 		command = append(command, commandValue)
 	}
 	return command
+}
+
+func GetPodsFromDeployment(logger log.FieldLogger, client kubernetes.Interface, namespace string,
+	includeResources, excludeResources []kahuapi.ResourceSpec) ([]*v1.PodList, error) {
+	// Get all deployments
+	listOptions := metav1.ListOptions{}
+	deployments, err := client.AppsV1().Deployments(namespace).List(context.TODO(), listOptions)
+	if err != nil{
+		logger.Errorf("unable to list deployment for namespace %s", namespace)
+		return nil, err
+	}
+
+	// Filter deployments for resource spec
+	var allResources []string
+	for _, deployment := range deployments.Items {
+		allResources = append(allResources, deployment.Name)
+	}
+	filteredDeployments := utils.FindMatchedStrings(utils.Deployment,
+		allResources,
+		includeResources,
+		excludeResources)
+
+
+	logger.Infof("DEBUG: namespace (%s) All deployments %+v ", namespace, deployments)
+	resourceSet := sets.NewString(filteredDeployments...)
+	var allPodList []*v1.PodList
+	for _, deployment := range deployments.Items{
+		if resourceSet.Has(deployment.Name) {
+			listOptions := metav1.ListOptions{LabelSelector: labels.Set(deployment.Spec.Selector.MatchLabels).String()}
+			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			if err != nil {
+				logger.Errorf("unable to list pod for deployment %s", deployment)
+				return allPodList, err
+			}
+			allPodList = append(allPodList, pods)
+		}
+	}
+	return allPodList, nil
+}
+
+func GetPodsFromDaemonset(logger log.FieldLogger, client kubernetes.Interface, namespace string,
+	includeResources, excludeResources []kahuapi.ResourceSpec) ([]*v1.PodList, error) {
+	// Get all daemonsets
+	listOptions := metav1.ListOptions{}
+	daemonsets, err := client.AppsV1().DaemonSets(namespace).List(context.TODO(), listOptions)
+	if err != nil{
+		logger.Errorf("unable to list daemonset for namespace %s", namespace)
+		return nil, err
+	}
+
+	// Filter daemonsets for ResourceSpec
+	var allResources []string
+	for _, daemonset := range daemonsets.Items {
+		allResources = append(allResources, daemonset.Name)
+	}
+	filteredDeployments := utils.FindMatchedStrings(utils.Daemonset,
+		allResources,
+		includeResources,
+		excludeResources)
+
+
+	logger.Infof("DEBUG: namespace (%s) All daemonsets %+v ", namespace, daemonsets)
+	resourceSet := sets.NewString(filteredDeployments...)
+	var allPodList []*v1.PodList
+	for _, daemonset := range daemonsets.Items{
+		if resourceSet.Has(daemonset.Name) {
+			listOptions := metav1.ListOptions{LabelSelector: labels.Set(daemonset.Spec.Selector.MatchLabels).String()}
+			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			if err != nil {
+				logger.Errorf("unable to list pod for daemonset %s", daemonset)
+				return allPodList, err
+			}
+			allPodList = append(allPodList, pods)
+		}
+	}
+	return allPodList, nil
+}
+
+
+func GetPodsFromStatefulset(logger log.FieldLogger, client kubernetes.Interface, namespace string,
+	includeResources, excludeResources []kahuapi.ResourceSpec) ([]*v1.PodList, error) {
+	// Get all statefulsets
+	listOptions := metav1.ListOptions{}
+	statefulsets, err := client.AppsV1().StatefulSets(namespace).List(context.TODO(), listOptions)
+	if err != nil{
+		logger.Errorf("unable to list statefulset for namespace %s", namespace)
+		return nil, err
+	}
+
+	// Filter statefulsets for ResourceSpec
+	var allResources []string
+	for _, statefulset := range statefulsets.Items {
+		allResources = append(allResources, statefulset.Name)
+	}
+	filteredDeployments := utils.FindMatchedStrings(utils.Daemonset,
+		allResources,
+		includeResources,
+		excludeResources)
+
+
+	logger.Infof("DEBUG: namespace (%s) All statefulsets %+v ", namespace, statefulsets)
+	resourceSet := sets.NewString(filteredDeployments...)
+	var allPodList []*v1.PodList
+	for _, statefulset := range statefulsets.Items{
+		if resourceSet.Has(statefulset.Name) {
+			listOptions := metav1.ListOptions{LabelSelector: labels.Set(statefulset.Spec.Selector.MatchLabels).String()}
+			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			if err != nil {
+				logger.Errorf("unable to list pod for statefulset %s", statefulset)
+				return allPodList, err
+			}
+			allPodList = append(allPodList, pods)
+		}
+	}
+	return allPodList, nil
+}
+
+
+func GetPodsFromReplicaset(logger log.FieldLogger, client kubernetes.Interface, namespace string,
+	includeResources, excludeResources []kahuapi.ResourceSpec) ([]*v1.PodList, error) {
+	// Get all replicasets
+	listOptions := metav1.ListOptions{}
+	replicasets, err := client.AppsV1().ReplicaSets(namespace).List(context.TODO(), listOptions)
+	if err != nil{
+		logger.Errorf("unable to list replicaset for namespace %s", namespace)
+		return nil, err
+	}
+
+	// Filter replicasets for ResourceSpec
+	var allResources []string
+	for _, replicaset := range replicasets.Items {
+		allResources = append(allResources, replicaset.Name)
+	}
+	filteredDeployments := utils.FindMatchedStrings(utils.Daemonset,
+		allResources,
+		includeResources,
+		excludeResources)
+
+
+	logger.Infof("DEBUG: namespace (%s) All replicasets %+v ", namespace, replicasets)
+	resourceSet := sets.NewString(filteredDeployments...)
+	var allPodList []*v1.PodList
+	for _, replicaset := range replicasets.Items{
+		if resourceSet.Has(replicaset.Name) {
+			listOptions := metav1.ListOptions{LabelSelector: labels.Set(replicaset.Spec.Selector.MatchLabels).String()}
+			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			if err != nil {
+				logger.Errorf("unable to list pod for replicaset %s", replicaset)
+				return allPodList, err
+			}
+			allPodList = append(allPodList, pods)
+		}
+	}
+	return allPodList, nil
 }
