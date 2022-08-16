@@ -293,6 +293,8 @@ func (ctx *restoreContext) syncRestore(restore *kahuapi.Restore) error {
 			ctx.logger.Errorf("Restore status update failed. %s", err)
 			return err
 		}
+	case kahuapi.RestoreStageFinished:
+		return nil
 	}
 
 	// fetch backup info

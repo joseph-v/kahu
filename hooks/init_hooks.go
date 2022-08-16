@@ -153,6 +153,7 @@ func getInitRestoreHookFromAnnotation(podName string, annotations map[string]str
 				Image:   containerImage,
 				Name:    containerName,
 				Command: parseStringToCommand(command),
+				// ImagePullPolicy: v1.PullIfNotPresent,
 			},
 		},
 	}

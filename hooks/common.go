@@ -164,7 +164,7 @@ func GetPodsFromDeployment(logger log.FieldLogger, client kubernetes.Interface, 
 	// Get all deployments
 	listOptions := metav1.ListOptions{}
 	deployments, err := client.AppsV1().Deployments(namespace).List(context.TODO(), listOptions)
-	if err != nil{
+	if err != nil {
 		logger.Errorf("unable to list deployment for namespace %s", namespace)
 		return nil, err
 	}
@@ -179,14 +179,12 @@ func GetPodsFromDeployment(logger log.FieldLogger, client kubernetes.Interface, 
 		includeResources,
 		excludeResources)
 
-
-	logger.Infof("DEBUG: namespace (%s) All deployments %+v ", namespace, deployments)
 	resourceSet := sets.NewString(filteredDeployments...)
 	var allPodList []*v1.PodList
-	for _, deployment := range deployments.Items{
+	for _, deployment := range deployments.Items {
 		if resourceSet.Has(deployment.Name) {
 			listOptions := metav1.ListOptions{LabelSelector: labels.Set(deployment.Spec.Selector.MatchLabels).String()}
-			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			pods, err := client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
 			if err != nil {
 				logger.Errorf("unable to list pod for deployment %s", deployment)
 				return allPodList, err
@@ -202,7 +200,7 @@ func GetPodsFromDaemonset(logger log.FieldLogger, client kubernetes.Interface, n
 	// Get all daemonsets
 	listOptions := metav1.ListOptions{}
 	daemonsets, err := client.AppsV1().DaemonSets(namespace).List(context.TODO(), listOptions)
-	if err != nil{
+	if err != nil {
 		logger.Errorf("unable to list daemonset for namespace %s", namespace)
 		return nil, err
 	}
@@ -217,14 +215,12 @@ func GetPodsFromDaemonset(logger log.FieldLogger, client kubernetes.Interface, n
 		includeResources,
 		excludeResources)
 
-
-	logger.Infof("DEBUG: namespace (%s) All daemonsets %+v ", namespace, daemonsets)
 	resourceSet := sets.NewString(filteredDeployments...)
 	var allPodList []*v1.PodList
-	for _, daemonset := range daemonsets.Items{
+	for _, daemonset := range daemonsets.Items {
 		if resourceSet.Has(daemonset.Name) {
 			listOptions := metav1.ListOptions{LabelSelector: labels.Set(daemonset.Spec.Selector.MatchLabels).String()}
-			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			pods, err := client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
 			if err != nil {
 				logger.Errorf("unable to list pod for daemonset %s", daemonset)
 				return allPodList, err
@@ -235,13 +231,12 @@ func GetPodsFromDaemonset(logger log.FieldLogger, client kubernetes.Interface, n
 	return allPodList, nil
 }
 
-
 func GetPodsFromStatefulset(logger log.FieldLogger, client kubernetes.Interface, namespace string,
 	includeResources, excludeResources []kahuapi.ResourceSpec) ([]*v1.PodList, error) {
 	// Get all statefulsets
 	listOptions := metav1.ListOptions{}
 	statefulsets, err := client.AppsV1().StatefulSets(namespace).List(context.TODO(), listOptions)
-	if err != nil{
+	if err != nil {
 		logger.Errorf("unable to list statefulset for namespace %s", namespace)
 		return nil, err
 	}
@@ -256,14 +251,12 @@ func GetPodsFromStatefulset(logger log.FieldLogger, client kubernetes.Interface,
 		includeResources,
 		excludeResources)
 
-
-	logger.Infof("DEBUG: namespace (%s) All statefulsets %+v ", namespace, statefulsets)
 	resourceSet := sets.NewString(filteredDeployments...)
 	var allPodList []*v1.PodList
-	for _, statefulset := range statefulsets.Items{
+	for _, statefulset := range statefulsets.Items {
 		if resourceSet.Has(statefulset.Name) {
 			listOptions := metav1.ListOptions{LabelSelector: labels.Set(statefulset.Spec.Selector.MatchLabels).String()}
-			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			pods, err := client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
 			if err != nil {
 				logger.Errorf("unable to list pod for statefulset %s", statefulset)
 				return allPodList, err
@@ -274,13 +267,12 @@ func GetPodsFromStatefulset(logger log.FieldLogger, client kubernetes.Interface,
 	return allPodList, nil
 }
 
-
 func GetPodsFromReplicaset(logger log.FieldLogger, client kubernetes.Interface, namespace string,
 	includeResources, excludeResources []kahuapi.ResourceSpec) ([]*v1.PodList, error) {
 	// Get all replicasets
 	listOptions := metav1.ListOptions{}
 	replicasets, err := client.AppsV1().ReplicaSets(namespace).List(context.TODO(), listOptions)
-	if err != nil{
+	if err != nil {
 		logger.Errorf("unable to list replicaset for namespace %s", namespace)
 		return nil, err
 	}
@@ -295,14 +287,12 @@ func GetPodsFromReplicaset(logger log.FieldLogger, client kubernetes.Interface, 
 		includeResources,
 		excludeResources)
 
-
-	logger.Infof("DEBUG: namespace (%s) All replicasets %+v ", namespace, replicasets)
 	resourceSet := sets.NewString(filteredDeployments...)
 	var allPodList []*v1.PodList
-	for _, replicaset := range replicasets.Items{
+	for _, replicaset := range replicasets.Items {
 		if resourceSet.Has(replicaset.Name) {
 			listOptions := metav1.ListOptions{LabelSelector: labels.Set(replicaset.Spec.Selector.MatchLabels).String()}
-			pods, err :=  client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
+			pods, err := client.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
 			if err != nil {
 				logger.Errorf("unable to list pod for replicaset %s", replicaset)
 				return allPodList, err

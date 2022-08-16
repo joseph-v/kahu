@@ -23,9 +23,11 @@ import (
 
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/tools/cache"
@@ -41,6 +43,24 @@ const (
 	podRestoreHookTimeoutAnnotationKey     = "post.hook.restore.kahu.io/exec-timeout"
 	podRestoreHookWaitTimeoutAnnotationKey = "post.hook.restore.kahu.io/wait-timeout"
 )
+
+const (
+	deploymentsResources   = "deployments"
+	replicasetsResources   = "replicasets"
+	statefulsetsResources   = "statefulsets"
+	daemonsetsResources   = "daemonsets"
+)
+
+type WaitHandler interface {
+	WaitResource(
+		ctx context.Context,
+		log logrus.FieldLogger,
+		robj *unstructured.Unstructured,
+		selectorName string,
+		selectorNamespace string,
+		resourceType string,
+	) error
+}
 
 type WaitExecHookHandler interface {
 	HandleHooks(
@@ -64,6 +84,25 @@ func (d *DefaultListWatchFactory) NewListWatch(namespace string, selector fields
 }
 
 var _ ListWatchFactory = &DefaultListWatchFactory{}
+
+type RListWatchFactory interface {
+	NewListWatch(resource, namespace string, selector fields.Selector) cache.ListerWatcher
+}
+
+type ResourceListWatchFactory struct {
+	ResourceGetter cache.Getter
+}
+
+func (r *ResourceListWatchFactory) NewListWatch(resource, namespace string, selector fields.Selector) cache.ListerWatcher {
+
+	return cache.NewListWatchFromClient(r.ResourceGetter, resource, namespace, selector)
+}
+
+type ResourceWaitHandler struct {
+	ResourceListWatchFactory ResourceListWatchFactory
+}
+
+var _ WaitHandler = &ResourceWaitHandler{}
 
 type DefaultWaitExecHookHandler struct {
 	ListWatchFactory   ListWatchFactory
@@ -179,7 +218,7 @@ func (e *DefaultWaitExecHookHandler) HandleHooks(
 					OnError:   hook.Hook.OnError,
 					Timeout:   hook.Hook.Timeout,
 				}
-				if err := e.PodCommandExecutor.ExecutePodCommand(hookLog, podMap, pod.Namespace, pod.Name, hook.HookName, eh); err != nil {
+				if err := e.PodCommandExecutor.ExecutePodCommand(hookLog, podMap, newPod.Namespace, newPod.Name, hook.HookName, eh); err != nil {
 					hookLog.WithError(err).Error("Error executing hook")
 					if hook.Hook.OnError == kahuapi.HookErrorModeFail {
 						errors = append(errors, err)
@@ -236,7 +275,6 @@ func (e *DefaultWaitExecHookHandler) HandleHooks(
 			}
 		}
 	}
-
 	return errors
 }
 
@@ -393,7 +431,7 @@ func GroupRestoreExecHooks(
 			named := PodExecRestoreHook{
 				HookName:   resourceHook.Name,
 				Hook:       *rh.Exec,
-				HookSource: "backupSpec",
+				HookSource: "RestoreSpec",
 			}
 			// default to first container in pod if unset, without mutating resource restore hook
 			if named.Hook.Container == "" {
@@ -404,4 +442,149 @@ func GroupRestoreExecHooks(
 	}
 
 	return byContainer, nil
+}
+
+func (r *ResourceWaitHandler) WaitResource(
+	ctx context.Context,
+	log logrus.FieldLogger,
+	robj *unstructured.Unstructured,
+	selectorName string,
+	selectorNamespace string,
+	resourceType string,
+) error {
+	if robj == nil {
+		return nil
+	}
+
+	timeout := "2m"
+
+	maxWait, err := time.ParseDuration(timeout)
+	if err != nil {
+		log.Infof("ParseDuration failed", timeout)
+		maxWait = 0
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	if maxWait > 0 {
+		ctx, cancel = context.WithTimeout(ctx, maxWait)
+	}
+	// waitStart := time.Now()
+
+	// var errors []error
+
+	handler := func(newObj interface{}) {
+		switch resourceType {
+		case deploymentsResources:
+			newResource, ok := newObj.(*appsv1.Deployment)
+			if !ok {
+				log.Errorf("invalid deployment (%s) object", newResource.Name)
+				return
+			}
+			log.Infof("Creation of deployment (%s) completed", newResource.Name)
+		case daemonsetsResources:
+			newResource, ok := newObj.(*appsv1.DaemonSet)
+			if !ok {
+				log.Errorf("invalid daemonsets (%s) object", newResource.Name)
+				return
+			}
+			log.Infof("Creation of daemonsets (%s) completed", newResource.Name)
+		case replicasetsResources:
+			newResource, ok := newObj.(*appsv1.ReplicaSet)
+			if !ok {
+				log.Errorf("invalid replicaset (%s) object", newResource.Name)
+				return
+			}
+			log.Infof("Creation of replicaset (%s) completed", newResource.Name)
+		case statefulsetsResources:
+			newResource, ok := newObj.(*appsv1.StatefulSet)
+			if !ok {
+				log.Errorf("invalid statefulset (%s) object", newResource.Name)
+				return
+			}
+			log.Infof("Creation of statefulset (%s) completed", newResource.Name)
+		default:
+		}
+		cancel()
+	}
+
+	log.Infof("DEPLOY: name: %+v ", selectorName)
+	log.Infof("DEPLOY: ns: %+v ", selectorNamespace)
+
+	selector := fields.OneTermEqualSelector("metadata.name", selectorName)
+	lw := r.ResourceListWatchFactory.NewListWatch(resourceType, selectorNamespace, selector)
+
+	var obj runtime.Object
+	switch resourceType {
+	case deploymentsResources:
+		log.Infof("DEBUG: wait for deployment (%s) create ", selectorName)
+		deployment := new(appsv1.Deployment)
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(robj.UnstructuredContent(), &deployment)
+		if err != nil {
+			log.Infof("failed to get deployment object")
+			return err
+		}
+		obj = runtime.Object(deployment)
+
+	case daemonsetsResources:
+		log.Infof("DEBUG: wait for daemonset (%s) create ", selectorName)
+		daemonset := new(appsv1.DaemonSet)
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(robj.UnstructuredContent(), &daemonset)
+		if err != nil {
+			log.Infof("failed to get daemonset object")
+			return err
+		}
+		obj = runtime.Object(daemonset)
+	case replicasetsResources:
+		log.Infof("DEBUG: wait for replicaset (%s) create ", selectorName)
+		replicaset := new(appsv1.Deployment)
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(robj.UnstructuredContent(), &replicaset)
+		if err != nil {
+			log.Infof("failed to get replicaset object")
+			return err
+		}
+		obj = runtime.Object(replicaset)
+	case statefulsetsResources:
+		log.Infof("DEBUG: wait for statefulset (%s) create ", selectorName)
+		statefulset := new(appsv1.Deployment)
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(robj.UnstructuredContent(), &statefulset)
+		if err != nil {
+			log.Infof("failed to get statefulset object")
+			return err
+		}
+		obj = runtime.Object(statefulset)
+	default:
+		log.Errorf("DEBUG: invalid resources type")
+		return nil
+	}
+
+	_, resWatcher := cache.NewInformer(lw, obj, 0, cache.ResourceEventHandlerFuncs{
+		AddFunc: handler,
+		UpdateFunc: func(_, newObj interface{}) {
+			handler(newObj)
+		},
+		DeleteFunc: func(obj interface{}) {
+			err := fmt.Errorf("Resource %s deleted before all hooks were executed", resourceType)
+			log.Error(err)
+			cancel()
+		},
+	})
+
+	log.Infof("DEBUG: --- before watch run ---")
+	resWatcher.Run(ctx.Done())
+	log.Infof("DEBUG: --- after  watch run ---")
+
+	// var timeoutCh <-chan time.Time
+	// if maxWait > 0 {
+	// 	timer := time.NewTimer(maxWait)
+	// 	defer timer.Stop()
+	// 	timeoutCh = timer.C
+	// }
+
+	// select {
+	// // case err = <-errCh:
+	// case <-timeoutCh:
+	// 	log.Errorf("-----------timed out after %v ----------", maxWait)
+	// 	return errors
+	// }
+	return nil
 }

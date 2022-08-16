@@ -400,8 +400,13 @@ func (ctrl *controller) syncVolumeBackup(
 			return err
 		}
 
+		lastBackup := &metav1.Time{Time: time.Now()}
+		time := metav1.Now()
 		backup, err = ctrl.updateBackupStatusWithEvent(backup,
-			kahuapi.BackupStatus{Stage: kahuapi.BackupStageFinished},
+			kahuapi.BackupStatus{Stage: kahuapi.BackupStageFinished,
+			State: kahuapi.BackupStateCompleted,
+			CompletionTimestamp: &time,
+			LastBackup: lastBackup},
 			v1.EventTypeNormal, string(kahuapi.BackupStageFinished), "Finish backup")
 		if err != nil {
 			ctrl.logger.Errorf("Update backup(%s) processing: failed to "+
@@ -414,14 +419,9 @@ func (ctrl *controller) syncVolumeBackup(
 		if backup.Status.State == kahuapi.BackupStateCompleted {
 			return nil
 		}
-		backup.Status.LastBackup = &metav1.Time{Time: time.Now()}
-		time := metav1.Now()
-		backup.Status.CompletionTimestamp = &time
-		backup.Status.State = kahuapi.BackupStateCompleted
 
-		ctrl.logger.Infof("completed backup with status: %s", backup.Status.Stage)
-		ctrl.updateStatus(backup, ctrl.backupClient, backup.Status)
-		ctrl.logger.Infof("DEBUG: Backup: BACKUP of all completed for  %s ----", backup.Name)
+		ctrl.logger.Infof("completed backup (%s) with status: (%s - %s)", backup.Name, backup.Status.Stage, backup.Status.State)
+		return nil
 	default:
 		ctrl.logger.Infof("DEBUG: Backup: --default--  %s", backup.Name)
 	}
@@ -627,13 +627,13 @@ func (ctrl *controller) updateBackupStatus(
 	// update Phase
 	if status.Stage != "" && toIota(backup.Status.Stage) < toIota(status.Stage) {
 		backupClone.Status.Stage = status.Stage
-		ctrl.logger.Infof("DEBUG: stage less :%+v -> %+v", backup.Status.State, status.Stage)
+		// ctrl.logger.Infof("DEBUG: stage less :%+v -> %+v", backup.Status.State, status.Stage)
 		dirty = true
 	}
 
 	if status.State != "" && backup.Status.State != status.State {
 		backupClone.Status.State = status.State
-		ctrl.logger.Infof("DEBUG: stage not nil :%+v -> %+v", backup.Status.State, status.Stage)
+		// ctrl.logger.Infof("DEBUG: stage not nil :%+v -> %+v", backup.Status.State, status.Stage)
 		dirty = true
 	}
 
@@ -641,21 +641,21 @@ func (ctrl *controller) updateBackupStatus(
 	if len(status.ValidationErrors) > 0 {
 		backupClone.Status.ValidationErrors = append(backupClone.Status.ValidationErrors,
 			status.ValidationErrors...)
-		ctrl.logger.Infof("DEBUG: val errors :%+v", status.Stage)
+		// ctrl.logger.Infof("DEBUG: val errors :%+v", status.Stage)
 		dirty = true
 	}
 
 	// update Start time
 	if backup.Status.StartTimestamp == nil {
 		backupClone.Status.StartTimestamp = status.StartTimestamp
-		ctrl.logger.Infof("DEBUG: ts not nil :%+v", status.Stage)
+		// ctrl.logger.Infof("DEBUG: ts not nil :%+v", status.Stage)
 		dirty = true
 	}
 
 	if backup.Status.LastBackup == nil &&
 		status.LastBackup != nil {
 		backupClone.Status.LastBackup = status.LastBackup
-		ctrl.logger.Infof("DEBUG: last backup is nil :%+v", status.Stage)
+		// ctrl.logger.Infof("DEBUG: last backup is nil :%+v", status.Stage)
 		dirty = true
 	}
 
@@ -663,7 +663,7 @@ func (ctrl *controller) updateBackupStatus(
 		backupClone.Status.Resources = append(backupClone.Status.Resources,
 			status.Resources...)
 		dirty = true
-		ctrl.logger.Infof("DEBUG: res len is nil :%+v", status.Stage)
+		// ctrl.logger.Infof("DEBUG: res len is nil :%+v", status.Stage)
 	}
 
 	if dirty {

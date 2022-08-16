@@ -20,13 +20,18 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"sync"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/client-go/dynamic"
 
 	kahuapi "github.com/soda-cdm/kahu/apis/kahu/v1"
 	"github.com/soda-cdm/kahu/hooks"
@@ -39,6 +44,13 @@ var (
 		"Namespace",
 		"Event",
 	)
+)
+
+const (
+	deploymentsResources  = "deployments"
+	replicasetsResources  = "replicasets"
+	statefulsetsResources = "statefulsets"
+	daemonsetsResources   = "daemonsets"
 )
 
 type backupInfo struct {
@@ -68,22 +80,6 @@ func (ctx *restoreContext) syncMetadataRestore(restore *kahuapi.Restore) error {
 		restore, err = ctx.updateRestoreStatus(restore)
 		return err
 	}
-
-	// Wait for all post-restore exec hooks with same logic as restic wait above.
-	go func() {
-		ctx.logger.Info("Waiting for all post-restore-exec hooks to complete")
-
-		ctx.hooksWaitGroup.Wait()
-		close(ctx.hooksErrs)
-	}()
-	var errs []string
-	for err := range ctx.hooksErrs {
-		errs = append(errs, err.Error())
-	}
-	if len(errs) > 0 {
-		ctx.logger.Errorf("Done waiting for all post-restore exec hooks to complete %+v", errs)
-	}
-	ctx.logger.Info("Done waiting for all post-restore exec hooks to complete")
 
 	restore.Status.Stage = kahuapi.RestoreStageFinished
 	restore.Status.State = kahuapi.RestoreStateCompleted
@@ -148,6 +144,27 @@ func (ctx *restoreContext) applyIndexedResource(restore *kahuapi.Restore) error 
 			return err
 		}
 	}
+
+	// Wait for all of the restore hook goroutines to be done, which is
+	// only possible once all of their errors have been received by the loop
+	// below, then close the hooksErrs channel so the loop terminates.
+	go func() {
+		ctx.logger.Info("Waiting for all post-restore-exec hooks to complete")
+
+		ctx.hooksWaitGroup.Wait()
+		close(ctx.hooksErrs)
+	}()
+	var errs []string
+	var err error
+	for err = range ctx.hooksErrs {
+		errs = append(errs, err.Error())
+	}
+	if len(errs) > 0 {
+		ctx.logger.Errorf("Failure while executing post exec hooks: %+v", errs)
+		return err
+	}
+	ctx.logger.Info("post hook execution is success!")
+
 	return nil
 }
 
@@ -177,42 +194,28 @@ func (ctx *restoreContext) applyResource(resource *unstructured.Unstructured, re
 		return nil
 	}
 
-	// init container hook
-	if resource.GetKind() == utils.Pod {
-		ctx.logger.Infof("Start processing init hook for Pod resource (%s)", resource.GetName())
-		hookHandler := hooks.InitHooksHandler{}
-		var initRes *unstructured.Unstructured
-		// if hookHandler.IsHooksSpecified(restore.Spec.Hooks.Resources, hooks.PreHookPhase) {
-		initRes, err = hookHandler.HandleInitHook(ctx.logger, hooks.Pods, resource, &restore.Spec.Hooks)
+	kind := resource.GetKind()
+
+	switch kind {
+	case utils.Deployment, utils.Daemonset, utils.Statefulset, utils.Replicaset:
+		err = ctx.applyWorkloadResources(resource, restore, resourceClient)
 		if err != nil {
-			ctx.logger.Errorf("Failed to process init hook for Pod resource (%s)", resource.GetName())
+			return err
 		}
-		if initRes != nil {
-			resource = initRes
+	case utils.Pod:
+		err = ctx.applyPodResources(resource, restore, resourceClient)
+		if err != nil {
+			return err
 		}
-		// }
-		// ctx.logger.Infof("-------Container after init: %+v", initRes)
+	default:
 		_, err = resourceClient.Create(context.TODO(), resource, metav1.CreateOptions{})
-		if err != nil && apierrors.IsAlreadyExists(err) {
+		if err != nil && !apierrors.IsAlreadyExists(err) {
 			// ignore if already exist
-			return nil
+			return err
 		}
-		// ctx.logger.Infof("-------Container after create: %+v", resource)
-		// post hook
-		// if hookHandler.IsHooksSpecified(restore.Spec.Hooks.Resources, hooks.PostHookPhase) {
-		ctx.waitExec(restore.Spec.Hooks.Resources, resource)
-		// }
-
-	} else {
-		_, err = resourceClient.Create(context.TODO(), resource, metav1.CreateOptions{})
-		if err != nil && apierrors.IsAlreadyExists(err) {
-			// ignore if already exist
-			return nil
-		}
-		// post hook
-		return err
-
+		return nil
 	}
+
 	return nil
 }
 
@@ -260,6 +263,187 @@ func (ctx *restoreContext) ensureNamespace(resource *unstructured.Unstructured) 
 	return nil
 }
 
+func (ctx *restoreContext) applyWorkloadResources(resource *unstructured.Unstructured,
+	restore *kahuapi.Restore,
+	resourceClient dynamic.ResourceInterface) error {
+	ctx.logger.Infof("Start processing init hook for Pod resource (%s)", resource.GetName())
+	var resourceType string
+	var labelSelectors map[string]string
+	var replicas int
+
+	switch resource.GetKind() {
+	case utils.Deployment:
+		// get all pods for deployment
+		ctx.logger.Infof("Restore of deployment: %s", resource.GetName())
+		resourceType = deploymentsResources
+		var deployment *appsv1.Deployment
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, &deployment)
+		if err != nil {
+			ctx.logger.Errorf("failed to get unstructred deployment", deployment)
+			return err
+		}
+
+		deploy := deployment.DeepCopy()
+		if deploy.Spec.Selector.MatchLabels != nil {
+			labelSelectors = deploy.Spec.Selector.MatchLabels
+		}
+		replicas = int(*deploy.Spec.Replicas)
+	case utils.Daemonset:
+		// get all pods for daemonset
+		ctx.logger.Infof("Restore of daemonset: %s", resource.GetName())
+		resourceType = daemonsetsResources
+		var daemonset *appsv1.DaemonSet
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, &daemonset)
+		if err != nil {
+			ctx.logger.Errorf("failed to get unstructred daemonset", daemonset)
+			return err
+		}
+
+		deploy := daemonset.DeepCopy()
+		if deploy.Spec.Selector.MatchLabels != nil {
+			labelSelectors = deploy.Spec.Selector.MatchLabels
+		}
+		replicas = int(1) // One daemon per node
+	case utils.Statefulset:
+		// get all pods for statefulset
+		ctx.logger.Infof("Restore of statefulset: %s", resource.GetName())
+		resourceType = statefulsetsResources
+		var statefulset *appsv1.StatefulSet
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, &statefulset)
+		if err != nil {
+			ctx.logger.Errorf("failed to get unstructred statefulset", statefulset)
+			return err
+		}
+
+		deploy := statefulset.DeepCopy()
+		if deploy.Spec.Selector.MatchLabels != nil {
+			labelSelectors = deploy.Spec.Selector.MatchLabels
+		}
+		replicas = int(*deploy.Spec.Replicas)
+	case utils.Replicaset:
+		// get all pods for replicaset
+		ctx.logger.Infof("Restore of replicaset: %s", resource.GetName())
+		resourceType = replicasetsResources
+		var replicaset *appsv1.ReplicaSet
+		err := runtime.DefaultUnstructuredConverter.FromUnstructured(resource.Object, &replicaset)
+		if err != nil {
+			ctx.logger.Errorf("failed to get unstructred replicaset", replicaset)
+			return err
+		}
+
+		deploy := replicaset.DeepCopy()
+		if deploy.Spec.Selector.MatchLabels != nil {
+			labelSelectors = deploy.Spec.Selector.MatchLabels
+		}
+		replicas = int(*deploy.Spec.Replicas)
+	default:
+	}
+
+	ctx.hooksWaitGroup.Add(1)
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go func() {
+		// defer ctx.hooksWaitGroup.Done()
+		defer wg.Done()
+
+		wh := &hooks.ResourceWaitHandler{
+			ResourceListWatchFactory: hooks.ResourceListWatchFactory{
+				ResourceGetter: ctx.kubeClient.AppsV1().RESTClient(),
+			},
+		}
+		err := wh.WaitResource(ctx.hooksContext, ctx.logger, resource,
+			resource.GetName(), resource.GetNamespace(), resourceType)
+		if err != nil {
+			ctx.logger.Errorf("error executing wait for %s", resourceType)
+
+		}
+	}()
+
+	return ctx.applyWorkloadPodResources(resource, restore, resourceClient, &wg, labelSelectors, replicas)
+}
+
+func (ctx *restoreContext) applyWorkloadPodResources(resource *unstructured.Unstructured,
+	restore *kahuapi.Restore,
+	resourceClient dynamic.ResourceInterface,
+	wg *sync.WaitGroup,
+	labelSelectors map[string]string,
+	replicas int) error {
+	// Done is called when all pods for the resource is scheduled for hooks
+	defer ctx.hooksWaitGroup.Done()
+
+	_, err := resourceClient.Create(context.TODO(), resource, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		// ignore if already exist
+		ctx.logger.Infof("failed to create %s", resource.GetName())
+		return err
+	}
+
+	wg.Wait()
+
+	namespace := resource.GetNamespace()
+	time.Sleep(2 * time.Second)
+
+	pods, err := ctx.kubeClient.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
+		LabelSelector: labels.Set(labelSelectors).String(),
+	})
+	if err != nil {
+		ctx.logger.Errorf("unable to list pod for resource %s-%s", namespace, resource.GetName())
+		return err
+	}
+
+	if len(pods.Items) < replicas {
+		time.Sleep(10 * time.Second)
+		pods, err = ctx.kubeClient.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
+			LabelSelector: labels.Set(labelSelectors).String(),
+		})
+		if err != nil {
+			ctx.logger.Errorf("unable to list pod for resource %s-%s", namespace, resource.GetName())
+			return err
+		}
+	}
+
+	for _, pod := range pods.Items {
+		podMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(&pod)
+		if err != nil {
+			ctx.logger.Errorf("failed to convert pod (%s) to unstructured, %+v", pod.Name, err.Error())
+			return err
+		}
+
+		podUns := &unstructured.Unstructured{Object: podMap}
+		// post exec hooks
+		ctx.waitExec(restore.Spec.Hooks.Resources, podUns)
+	}
+	return nil
+}
+
+func (ctx *restoreContext) applyPodResources(resource *unstructured.Unstructured,
+	restore *kahuapi.Restore,
+	resourceClient dynamic.ResourceInterface) error {
+	ctx.logger.Infof("Start processing init hook for Pod resource (%s)", resource.GetName())
+	hookHandler := hooks.InitHooksHandler{}
+	var initRes *unstructured.Unstructured
+
+	initRes, err := hookHandler.HandleInitHook(ctx.logger, hooks.Pods, resource, &restore.Spec.Hooks)
+	if err != nil {
+		ctx.logger.Errorf("Failed to process init hook for Pod resource (%s)", resource.GetName())
+		return err
+	}
+	if initRes != nil {
+		resource = initRes
+	}
+
+	_, err = resourceClient.Create(context.TODO(), resource, metav1.CreateOptions{})
+	if err != nil && !apierrors.IsAlreadyExists(err) {
+		// ignore if already exist
+		return err
+	}
+
+	// post hook
+	ctx.waitExec(restore.Spec.Hooks.Resources, resource)
+	return nil
+}
+
 // waitExec executes hooks in a restored pod's containers when they become ready.
 func (ctx *restoreContext) waitExec(resourceHooks []kahuapi.RestoreResourceHookSpec, createdObj *unstructured.Unstructured) {
 	ctx.hooksWaitGroup.Add(1)
@@ -286,7 +470,7 @@ func (ctx *restoreContext) waitExec(resourceHooks []kahuapi.RestoreResourceHookS
 		}
 
 		if errs := ctx.waitExecHookHandler.HandleHooks(ctx.hooksContext, ctx.logger, pod, execHooksByContainer); len(errs) > 0 {
-			// ctx.logger.WithError(kubeerrs.NewAggregate(errs)).Error("unable to successfully execute post-restore hooks")
+			ctx.logger.Error("unable to successfully execute post-restore hooks")
 			ctx.hooksCancelFunc()
 
 			for _, err := range errs {

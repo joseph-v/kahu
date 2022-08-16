@@ -74,7 +74,6 @@ func NewHooks(kubeClient kubernetes.Interface, restConfig *restclient.Config,
 // ExecuteHook will handle executions of backup hooks
 func (h *hooksHandler) ExecuteHook(logger log.FieldLogger, backupSpec *kahuapi.BackupSpec, phase string) error {
 	logger = logger.WithField("hook-phase", phase)
-	logger.Infof("Starting execution for (%s) hook", backupSpec)
 	namespaces, err := h.kubeClient.CoreV1().Namespaces().List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		logger.Errorf("unable to list namespaces for hooks %s", err.Error())
@@ -84,12 +83,10 @@ func (h *hooksHandler) ExecuteHook(logger log.FieldLogger, backupSpec *kahuapi.B
 	for _, namespace := range namespaces.Items {
 		allNamespaces.Insert(namespace.Name)
 	}
-	logger.Infof("DEBUG: All allNamespaces %+v ", allNamespaces)
 
 	filteredHookNamespaces := filterHookNamespaces(allNamespaces,
 		backupSpec.IncludeNamespaces,
 		backupSpec.ExcludeNamespaces)
-	logger.Infof("DEBUG: filteredHookNamespaces %+v ", filteredHookNamespaces)
 
 	for _, namespace := range filteredHookNamespaces.UnsortedList() {
 		// Get label selector
@@ -97,56 +94,7 @@ func (h *hooksHandler) ExecuteHook(logger log.FieldLogger, backupSpec *kahuapi.B
 		if err != nil {
 			return err
 		}
-		// logger.Infof("%+v", podss)
-		// var labelSelectors map[string]string
-		// if backupSpec.Label != nil {
-		// 	labelSelectors = backupSpec.Label.MatchLabels
-		// }
-		// pods, err := h.kubeClient.CoreV1().Pods(namespace).List(context.TODO(), metav1.ListOptions{
-		// 	LabelSelector: labels.Set(labelSelectors).String(),
-		// })
-		// if err != nil {
-		// 	logger.Errorf("unable to list pod for namespace %s", namespace)
-		// 	return err
-		// }
-		// logger.Infof("DEBUG: namespace (%s) All pods %+v ", namespace, pods)
-		// // Get all deployments
-		// listOptions := metav1.ListOptions{}
-		// deployments, err := h.kubeClient.AppsV1().Deployments(namespace).List(context.TODO(), listOptions)
-		// if err != nil{
-		// 	log.Fatal(err)
-		// }
-		// logger.Infof("DEBUG: namespace (%s) All deployments %+v ", namespace, deployments)
-		// for _, deployment:=range deployments.Items{
-		// 	// if strings.Contains(svc.Name, deployment){
-		// 	// 	fmt.Fprintf(os.Stdout, "service name: %v\n", svc.Name)
-		// 	// 	return &svc, nil
-		// 	// }
-		// 	// set := labels.Set(deployment.Spec.Selector)
-		// 	// listOptions:= metav1.ListOptions{LabelSelector: set.AsSelector().String()}
-		// 	listOptions:= metav1.ListOptions{LabelSelector: labels.Set(deployment.Spec.Selector.MatchLabels).String()}
-		// 	pod1s, err:=  h.kubeClient.CoreV1().Pods(namespace).List(context.TODO(), listOptions)
-		// 	if err != nil {
-		// 		logger.Errorf("unable to list pod for deployment %s", deployment)
-		// 		return err
-		// 	}
-		// 	for _,pod1:= range pod1s.Items{
-		// 		logger.Infof("DEBUG: Deployment pod name: %v\n", pod1.Name)
-		// 	}
-		// }
 
-		// // Filter pods for backup
-		// var allPods []string
-		// for _, pod := range pods.Items {
-		// 	allPods = append(allPods, pod.Name)
-		// }
-
-		// filteredPods := utils.FindMatchedStrings(utils.Pod,
-		// 	allPods,
-		// 	backupSpec.IncludeResources,
-		// 	backupSpec.ExcludeResources)
-
-		logger.Infof("DEBUG: namespace (%s) Filtered pods %+v ", namespace, filteredPods)
 		for _, pod := range filteredPods {
 			err := h.executeHook(logger, backupSpec.Hook.Resources, namespace, pod, phase)
 			if err != nil {
@@ -243,7 +191,7 @@ func (h *hooksHandler) getAllPodsForNamespace(logger log.FieldLogger, namespace 
 		logger.Errorf("unable to list pod for namespace %s", namespace)
 		return nil, err
 	}
-	logger.Infof("DEBUG: namespace (%s)  pods:-", namespace)
+
 	for _, pod := range pods.Items {
 		logger.Infof("%s", pod.Name)
 	}
